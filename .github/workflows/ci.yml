@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  node:
+    name: Typecheck + tests + coverage + build + audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      # Coverage is a HARD GATE: the thresholds in vitest.config.ts fail
+      # the run if the security-critical modules drop below their floor.
+      - name: Unit tests + coverage (vitest)
+        run: npx vitest run --coverage
+
+      - name: Build
+        run: npm run build
+
+      - name: Verify package (publint + are-the-types-wrong)
+        run: |
+          npx publint
+          npx @arethetypeswrong/cli --pack . --profile node16
+
+      - name: npm audit (moderate+)
+        run: npm audit --omit=dev --audit-level=moderate
+
+      - name: Pack tarball
+        run: npm pack
+
+      - name: Upload tarball (consumed by @atol-sh/react + console e2e)
+        uses: actions/upload-artifact@v5
+        with:
+          name: atol-sh-js-tgz
+          path: atol-sh-js-*.tgz
+          retention-days: 14

@@ -1,0 +1,9 @@
+node_modules/
+dist/
+reports/
+coverage/
+*.tgz
+*.tsbuildinfo
+.DS_Store
+.claude/settings.local.json
+.claude/worktrees/

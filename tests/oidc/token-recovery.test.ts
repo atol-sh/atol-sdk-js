@@ -1,0 +1,141 @@
+/**
+ * Unit tests for the renewal-error classification layer. Every OAuth
+ * error code we recognize is pinned to its action, and the default
+ * branches (unknown codes, unknown Error subclasses) are pinned to
+ * `Surface` -- that conservative default is the load-bearing property.
+ */
+import { describe, it, expect } from "vitest"
+import {
+  LoginRequiredError,
+  NetworkError,
+  OAuthProtocolError,
+  RecoveryAction,
+  backoffDelay,
+  classifyRenewalError,
+} from "../../src/oidc/token-recovery"
+
+describe("classifyRenewalError -- terminal auth errors", () => {
+  it.each([
+    "invalid_grant",
+    "invalid_request",
+    "invalid_client",
+    "unauthorized_client",
+    "login_required",
+    "consent_required",
+    "interaction_required",
+  ])("%s -> ForceReauth", (code) => {
+    expect(classifyRenewalError(new OAuthProtocolError(code, "msg"))).toBe(
+      RecoveryAction.ForceReauth,
+    )
+  })
+
+  it("LoginRequiredError -> ForceReauth (subclass path)", () => {
+    expect(classifyRenewalError(new LoginRequiredError("x"))).toBe(
+      RecoveryAction.ForceReauth,
+    )
+  })
+})
+
+describe("classifyRenewalError -- transient errors", () => {
+  it.each(["server_error", "temporarily_unavailable"])("%s -> Retry", (code) => {
+    expect(classifyRenewalError(new OAuthProtocolError(code))).toBe(
+      RecoveryAction.Retry,
+    )
+  })
+
+  it("NetworkError -> Retry", () => {
+    expect(classifyRenewalError(new NetworkError("fetch failed"))).toBe(
+      RecoveryAction.Retry,
+    )
+  })
+
+  it("bare TypeError (fetch rejection) -> Retry", () => {
+    expect(classifyRenewalError(new TypeError("Failed to fetch"))).toBe(
+      RecoveryAction.Retry,
+    )
+  })
+})
+
+describe("classifyRenewalError -- surface", () => {
+  it.each([
+    "invalid_scope",
+    "unsupported_grant_type",
+    "unsupported_response_type",
+  ])("%s -> Surface", (code) => {
+    expect(classifyRenewalError(new OAuthProtocolError(code))).toBe(
+      RecoveryAction.Surface,
+    )
+  })
+
+  it("unknown OAuth code -> Surface (conservative default)", () => {
+    expect(classifyRenewalError(new OAuthProtocolError("mystery_error"))).toBe(
+      RecoveryAction.Surface,
+    )
+  })
+
+  it("plain Error -> Surface (not auto-retryable)", () => {
+    expect(classifyRenewalError(new Error("something"))).toBe(
+      RecoveryAction.Surface,
+    )
+  })
+
+  it("non-error value -> Surface", () => {
+    expect(classifyRenewalError("string thrown")).toBe(RecoveryAction.Surface)
+    expect(classifyRenewalError(null)).toBe(RecoveryAction.Surface)
+    expect(classifyRenewalError(undefined)).toBe(RecoveryAction.Surface)
+  })
+})
+
+describe("backoffDelay", () => {
+  it("grows exponentially with the attempt counter", () => {
+    const fiftyPercent = () => 0.5
+    const d0 = backoffDelay(0, fiftyPercent)
+    const d1 = backoffDelay(1, fiftyPercent)
+    const d2 = backoffDelay(2, fiftyPercent)
+    const d3 = backoffDelay(3, fiftyPercent)
+    expect(d1).toBe(d0 * 2)
+    expect(d2).toBe(d1 * 2)
+    expect(d3).toBe(d2 * 2)
+  })
+
+  it("never exceeds the 30s cap", () => {
+    expect(backoffDelay(100, () => 0.9999)).toBeLessThan(30_000)
+  })
+
+  it("bottoms out at 0 with rand=0", () => {
+    expect(backoffDelay(5, () => 0)).toBe(0)
+  })
+
+  it("treats negative attempts as 0", () => {
+    expect(backoffDelay(-10, () => 0.5)).toBe(backoffDelay(0, () => 0.5))
+  })
+})
+
+describe("OAuthProtocolError / LoginRequiredError / NetworkError shape", () => {
+  it("OAuthProtocolError carries the error code", () => {
+    const err = new OAuthProtocolError("invalid_grant", "token gone")
+    expect(err.code).toBe("invalid_grant")
+    expect(err.description).toBe("token gone")
+    expect(err.message).toBe("invalid_grant: token gone")
+    expect(err.name).toBe("OAuthProtocolError")
+  })
+
+  it("OAuthProtocolError with no description uses just the code as message", () => {
+    expect(new OAuthProtocolError("server_error").message).toBe("server_error")
+  })
+
+  it("LoginRequiredError is both OAuthProtocolError and LoginRequiredError", () => {
+    const err = new LoginRequiredError("session gone")
+    expect(err).toBeInstanceOf(LoginRequiredError)
+    expect(err).toBeInstanceOf(OAuthProtocolError)
+    expect(err.code).toBe("login_required")
+    expect(err.name).toBe("LoginRequiredError")
+  })
+
+  it("NetworkError carries an optional cause", () => {
+    const root = new Error("underlying")
+    const err = new NetworkError("wrap", root)
+    expect(err.cause).toBe(root)
+    expect(err.name).toBe("NetworkError")
+  })
+})

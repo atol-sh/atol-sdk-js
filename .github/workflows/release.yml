@@ -1,0 +1,65 @@
+name: Release
+
+# Publishes @atol-sh/js to npm on a v* tag using npm Trusted Publishing (OIDC).
+# No NPM_TOKEN: GitHub Actions mints a short-lived OIDC token that npm verifies
+# against this package's trusted-publisher config (set once on npmjs.com:
+# org=atol-sh, repo=atol-sdk-js, workflow filename=release.yml).
+# Prereqs: the repository is public, and the package already exists on the
+# registry (npm has no first-publish-via-OIDC yet: npm/cli#8544). See RELEASE.md
+# for the one-time manual bootstrap that creates the package.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+  id-token: write # OIDC token for trusted publishing + provenance
+
+jobs:
+  publish:
+    name: Build, verify, publish
+    runs-on: ubuntu-latest # cloud-hosted runner required; self-hosted unsupported
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22 # trusted publishing requires Node >= 22.14.0
+          cache: npm
+          registry-url: "https://registry.npmjs.org"
+
+      # actions/setup-node bundles npm 10.x; trusted publishing requires >= 11.5.1.
+      - name: Upgrade npm to a trusted-publishing-capable version
+        run: npm install -g npm@latest
+
+      - name: Install
+        run: npm ci
+
+      - name: Verify tag matches package.json version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(node -p "require('./package.json').version")"
+          if [ "$tag" != "$pkg" ]; then
+            echo "tag $GITHUB_REF_NAME does not match package.json version $pkg" >&2
+            exit 1
+          fi
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests (vitest)
+        run: npx vitest run
+
+      - name: Build
+        run: npm run build
+
+      # Catch packaging (exports/types) regressions before they reach npm.
+      # attw is enforced in ci.yml on every PR; here we block on publint errors.
+      - name: Verify package (publint)
+        run: npx publint
+
+      # Trusted publishing: no NODE_AUTH_TOKEN. --provenance is passed explicitly
+      # (npm/cli#8730: OIDC publishes have 404'd without it despite the docs
+      # saying provenance is automatic under trusted publishing).
+      - name: Publish to npm
+        run: npm publish --provenance --access public
