@@ -113,6 +113,26 @@ export interface AtolBrowserAuthConfig {
    * explicit at the call site.
    */
   storage?: 'memory'
+  /**
+   * TEST ONLY. Enable {@link AtolBrowserAuth.seedTestSession}, which
+   * establishes an authenticated session directly from a token response --
+   * WITHOUT an OIDC redirect/callback, and without signature, state, or
+   * nonce validation. Defaults to `false`; while `false`, `seedTestSession`
+   * throws.
+   *
+   * This exists so browser end-to-end tests (Cypress, Playwright) can
+   * bootstrap a logged-in session against the in-memory token store without a
+   * live IdP round-trip -- the reason the old `sessionStorage` priming trick
+   * stopped working once tokens moved in-memory. Skipping the OIDC checks is
+   * safe ONLY because it is test-only and your API still validates the
+   * presented token server-side; it must NEVER be enabled in a production
+   * build, or an XSS payload could mint a session. The whole point of
+   * in-memory storage is that persisted tokens are unreadable after an XSS,
+   * and this flag must not reopen that surface. When enabled, the client logs
+   * a one-time `console.warn` at construction as a guard against accidental
+   * production enablement.
+   */
+  allowTestSessions?: boolean
 }
 
 /** The current auth session, delivered to `onSessionChange` subscribers. */
@@ -275,6 +295,23 @@ export interface AtolBrowserAuth {
    * again on every subsequent change. Returns an unsubscribe function.
    */
   onSessionChange(cb: (session: AtolSession) => void): () => void
+  /**
+   * TEST ONLY. Establish an authenticated session directly from a raw token
+   * response, bypassing the OIDC redirect/callback and all signature, state,
+   * and nonce checks. Throws unless the client was created with
+   * `allowTestSessions: true` (see {@link AtolBrowserAuthConfig.allowTestSessions}).
+   *
+   * The tokens are adopted through the same path a real login/renewal uses:
+   * the user is stored in the (in-memory) token store, `getAccessToken`
+   * resolves the seeded token, proactive renewal is scheduled from its
+   * `exp`, and `onSessionChange` subscribers are notified -- so a framework
+   * binding flips to authenticated exactly as it would after a real login.
+   * Provide a token whose `exp` is in the future; an already-expired access
+   * token schedules an immediate renewal the hermetic test environment
+   * cannot satisfy. Never call this in production; the presented tokens are
+   * still validated server-side by your API.
+   */
+  seedTestSession(tokens: TokenResponse): Promise<AtolSession>
   /** Tear down timers, the broadcast channel, and subscriptions. */
   destroy(): void
 }
@@ -302,6 +339,18 @@ export function createAtolBrowserAuth(config: AtolBrowserAuthConfig): AtolBrowse
   const useRefreshTokens = config.useRefreshTokens ?? false
   const useRefreshTokensFallback = config.useRefreshTokensFallback ?? false
   const deriveEncryptionKey = config.deriveEncryptionKey ?? false
+  const allowTestSessions = config.allowTestSessions ?? false
+
+  // Loud, one-time guard: seedTestSession bypasses OIDC validation, so a
+  // build that reaches this branch in production is a security defect. The
+  // warning makes an accidental enablement visible in the console.
+  if (allowTestSessions && typeof console !== 'undefined') {
+    console.warn(
+      '[Atol] allowTestSessions is ENABLED: seedTestSession can establish a ' +
+        'session without OIDC validation. This is for tests only and must ' +
+        'never be enabled in production.',
+    )
+  }
 
   // Renewal model: by default (useRefreshTokens=false) renewal is a
   // hidden-iframe silent authorize against the IdP session cookie
@@ -920,6 +969,39 @@ export function createAtolBrowserAuth(config: AtolBrowserAuthConfig): AtolBrowse
     return { token, proof }
   }
 
+  async function seedTestSession(tokens: TokenResponse): Promise<AtolSession> {
+    if (!allowTestSessions) {
+      // Deny by default. Without the opt-in this method is inert, so an XSS
+      // payload in a production build cannot use it to forge a session.
+      throw new Error(
+        'seedTestSession is disabled: pass allowTestSessions:true to ' +
+          'createAtolBrowserAuth to enable it. It bypasses OIDC signature, ' +
+          'state, and nonce validation and must never be enabled in production.',
+      )
+    }
+    // A seeded access token needs a FUTURE `exp`. applyTokens schedules
+    // proactive renewal from the token's exp and a framework binding reads the
+    // token on the session change; a missing or already-past exp makes the
+    // client attempt an immediate renewal against an issuer the hermetic test
+    // cannot reach, which can flip the just-seeded session straight back to
+    // unauthenticated. Warn loudly so this surfaces as a diagnostic instead of
+    // a silent "authenticated then instantly signed out" flake.
+    const exp = getTokenExpiry(tokens.access_token)
+    if ((exp === null || exp <= Date.now()) && typeof console !== 'undefined') {
+      console.warn(
+        '[Atol] seedTestSession: the access token has no future `exp` claim; ' +
+          'the seeded session may immediately attempt renewal and drop. Seed a ' +
+          'token whose exp is in the future.',
+      )
+    }
+    // Adopt the tokens through the same routine a real login/renewal uses:
+    // store the user in-memory, set the current user/id token from the id
+    // token, honor the refresh-token retention policy, schedule renewal, and
+    // emit so subscribers (a framework binding) flip to authenticated.
+    await applyTokens(tokens)
+    return session()
+  }
+
   function onSessionChange(cb: (s: AtolSession) => void): () => void {
     subscribers.add(cb)
     // Fire immediately with the current snapshot.
@@ -962,6 +1044,7 @@ export function createAtolBrowserAuth(config: AtolBrowserAuthConfig): AtolBrowse
     signDPoPProof,
     isDPoPActive: () => dpop !== null,
     onSessionChange,
+    seedTestSession,
     destroy,
   }
 }

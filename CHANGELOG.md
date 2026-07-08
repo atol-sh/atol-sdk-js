@@ -8,6 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 No unreleased changes yet.
 
+## [0.1.1] - 2026-07-08
+
+### Added
+
+- `seedTestSession(tokens)` on the browser auth client, gated behind a new
+  `allowTestSessions` config flag (default `false`). It establishes an
+  authenticated session directly from a token response — bypassing the OIDC
+  redirect/callback and signature/state/nonce checks — so browser e2e tests
+  can bootstrap a logged-in session against the in-memory token store without
+  a live IdP. Adopted through the same `applyTokens` path as a real login, so
+  `onSessionChange` subscribers flip to authenticated. Deny-by-default: it
+  throws unless `allowTestSessions: true`; enabling it logs a one-time
+  `console.warn`, and seeding a token without a future `exp` warns too (such a
+  token triggers an immediate renewal that can drop the session). Never enable
+  in production. Consumed by `@atol-sh/react/testing`.
+
 ## [0.1.0] - 2026-07-05
 
 Initial release. Framework-agnostic browser security core extracted from
