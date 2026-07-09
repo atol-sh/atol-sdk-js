@@ -133,6 +133,21 @@ export interface AtolBrowserAuthConfig {
    * production enablement.
    */
   allowTestSessions?: boolean
+  /**
+   * TEST ONLY. A token response to adopt during {@link AtolBrowserAuth.init}
+   * INSTEAD of the cold-load silent-renew restore. Requires
+   * `allowTestSessions: true` (ignored otherwise). When set, `init()` skips the
+   * redirect-callback and hidden-iframe restore paths entirely and settles
+   * AUTHENTICATED from these tokens, deterministically -- so a browser e2e test
+   * lands on a logged-in app at first paint with no IdP round-trip and no
+   * restore iframe. That matters against a stubbed backend with no IdP at the
+   * `issuer`, where the restore iframe would otherwise never receive a
+   * `web_message` and block until it times out. Equivalent to calling
+   * {@link AtolBrowserAuth.seedTestSession} the instant the client is ready,
+   * but race-free because it happens inside `init()` before any restore.
+   * Provide a token whose `exp` is in the future. Never set in production.
+   */
+  initialTestSession?: TokenResponse
 }
 
 /** The current auth session, delivered to `onSessionChange` subscribers. */
@@ -326,6 +341,23 @@ function dpopEnabled(cfg: DPoPConfig | undefined): boolean {
 }
 
 /**
+ * Warn when a seeded test-session access token has no FUTURE `exp`. Such a
+ * token schedules an immediate renewal against an issuer a hermetic test
+ * cannot reach, which can flip the just-seeded session back to unauthenticated.
+ * Shared by `seedTestSession` and the `initialTestSession` init path.
+ */
+function warnIfSeedTokenNotFresh(accessToken: string): void {
+  const exp = getTokenExpiry(accessToken)
+  if ((exp === null || exp <= Date.now()) && typeof console !== 'undefined') {
+    console.warn(
+      '[Atol] test session: the access token has no future `exp` claim; the ' +
+        'seeded session may immediately attempt renewal and drop. Seed a token ' +
+        'whose exp is in the future.',
+    )
+  }
+}
+
+/**
  * Create a framework-agnostic Atol browser auth client. See
  * {@link AtolBrowserAuthConfig} for options. Call {@link AtolBrowserAuth.init}
  * once at startup.
@@ -340,6 +372,9 @@ export function createAtolBrowserAuth(config: AtolBrowserAuthConfig): AtolBrowse
   const useRefreshTokensFallback = config.useRefreshTokensFallback ?? false
   const deriveEncryptionKey = config.deriveEncryptionKey ?? false
   const allowTestSessions = config.allowTestSessions ?? false
+  // Only honored under allowTestSessions; ignored otherwise so a stray value
+  // can never establish a session in a production build.
+  const initialTestSession = allowTestSessions ? config.initialTestSession : undefined
 
   // Loud, one-time guard: seedTestSession bypasses OIDC validation, so a
   // build that reaches this branch in production is a security defect. The
@@ -865,6 +900,17 @@ export function createAtolBrowserAuth(config: AtolBrowserAuthConfig): AtolBrowse
       broadcast.subscribe((message) => {
         void onBroadcast(message)
       })
+      // TEST ONLY: adopt a pre-supplied session deterministically and skip the
+      // restore entirely -- no redirect-callback handling, no silent-renew
+      // iframe. Gated on allowTestSessions (initialTestSession is undefined
+      // otherwise). This is why it is race-free where seedTestSession-after-mount
+      // is not: init never launches the restore iframe that would otherwise
+      // block against a stubbed backend with no IdP.
+      if (initialTestSession) {
+        warnIfSeedTokenNotFresh(initialTestSession.access_token)
+        await applyTokens(initialTestSession)
+        return session()
+      }
       // Restore or complete-login.
       if (isCallbackUrl()) {
         try {
@@ -979,21 +1025,11 @@ export function createAtolBrowserAuth(config: AtolBrowserAuthConfig): AtolBrowse
           'state, and nonce validation and must never be enabled in production.',
       )
     }
-    // A seeded access token needs a FUTURE `exp`. applyTokens schedules
-    // proactive renewal from the token's exp and a framework binding reads the
-    // token on the session change; a missing or already-past exp makes the
-    // client attempt an immediate renewal against an issuer the hermetic test
-    // cannot reach, which can flip the just-seeded session straight back to
-    // unauthenticated. Warn loudly so this surfaces as a diagnostic instead of
-    // a silent "authenticated then instantly signed out" flake.
-    const exp = getTokenExpiry(tokens.access_token)
-    if ((exp === null || exp <= Date.now()) && typeof console !== 'undefined') {
-      console.warn(
-        '[Atol] seedTestSession: the access token has no future `exp` claim; ' +
-          'the seeded session may immediately attempt renewal and drop. Seed a ' +
-          'token whose exp is in the future.',
-      )
-    }
+    // A seeded access token needs a FUTURE `exp`: applyTokens schedules
+    // proactive renewal from it, and a missing/past exp makes the client renew
+    // immediately (and possibly drop the session). Warn loudly rather than let
+    // it become a silent "authenticated then instantly signed out" flake.
+    warnIfSeedTokenNotFresh(tokens.access_token)
     // Adopt the tokens through the same routine a real login/renewal uses:
     // store the user in-memory, set the current user/id token from the id
     // token, honor the refresh-token retention policy, schedule renewal, and

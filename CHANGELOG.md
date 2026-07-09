@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 No unreleased changes yet.
 
+## [0.1.2] - 2026-07-08
+
+### Added
+
+- `initialTestSession` config option (gated on `allowTestSessions`). When set,
+  `createAtolBrowserAuth(...).init()` adopts the given token response
+  deterministically and SKIPS the cold-load restore entirely -- no
+  redirect-callback handling, no hidden-iframe silent renew. The session settles
+  authenticated at first paint, race-free (unlike calling `seedTestSession`
+  after mount). This is the clean way to bootstrap a browser e2e session against
+  a stubbed backend with no IdP at the `issuer`, where the restore iframe would
+  otherwise block until it times out. Ignored unless `allowTestSessions: true`;
+  warns when the token has no future `exp`.
+
 ## [0.1.1] - 2026-07-08
 
 ### Added

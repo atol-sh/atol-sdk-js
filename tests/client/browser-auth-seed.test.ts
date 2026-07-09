@@ -46,8 +46,29 @@ vi.mock('../../src/oidc/oidc', async (importOriginal) => {
   }
 })
 
+// Stub the silent-renew iframe path (keep LoginRequiredError real for
+// instanceof) so the init() tests below can drive the restore path without a
+// real 60s-per-attempt hidden iframe, and assert it is SKIPPED when an
+// initialTestSession is supplied.
+vi.mock('../../src/oidc/silent-renew', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/oidc/silent-renew')>()
+  return {
+    ...actual,
+    silentAuthorizeWithRetry: vi.fn(),
+    exchangeCode: vi.fn(),
+    refreshTokenGrant: vi.fn(),
+    revokeToken: vi.fn().mockResolvedValue(undefined),
+  }
+})
+
 import { createAtolBrowserAuth, type AtolSession } from '../../src/client/browser-auth'
-import type { TokenResponse } from '../../src/oidc/silent-renew'
+import {
+  silentAuthorizeWithRetry,
+  LoginRequiredError,
+  type TokenResponse,
+} from '../../src/oidc/silent-renew'
+
+const mockAuthorize = vi.mocked(silentAuthorizeWithRetry)
 
 const ISSUER = 'https://auth.atol.test'
 const CLIENT_ID = 'atol_kid_test'
@@ -205,6 +226,57 @@ describe('seedTestSession when enabled', () => {
     // drive an immediate renewal -- warn about it.
     const session = await auth.seedTestSession(seedTokens({ access_token: makeJWT({ sub: 'user-1' }) }))
     expect(session.isAuthenticated).toBe(true)
+    expect(warn.mock.calls.some((c) => /future `exp`/.test(String(c[0])))).toBe(true)
+    auth.destroy()
+  })
+})
+
+describe('initialTestSession (adopt during init)', () => {
+  it('settles init() authenticated and never touches the restore iframe', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const auth = createAtolBrowserAuth({
+      issuer: ISSUER,
+      clientId: CLIENT_ID,
+      redirectUri: REDIRECT,
+      allowTestSessions: true,
+      initialTestSession: seedTokens(),
+    })
+    const session = await auth.init()
+    expect(session.isAuthenticated).toBe(true)
+    expect(session.user?.id).toBe('user-1')
+    // The whole point: restore (the hidden-iframe silent authorize) is skipped.
+    expect(mockAuthorize).not.toHaveBeenCalled()
+    auth.destroy()
+  })
+
+  it('is ignored without allowTestSessions -- init runs the normal restore', async () => {
+    // With the flag off, initialTestSession must NOT establish a session; init
+    // falls through to restore, which here resolves login_required -> unauth.
+    mockAuthorize.mockRejectedValueOnce(new LoginRequiredError('no idp session'))
+    const auth = createAtolBrowserAuth({
+      issuer: ISSUER,
+      clientId: CLIENT_ID,
+      redirectUri: REDIRECT,
+      allowTestSessions: false,
+      initialTestSession: seedTokens(),
+    })
+    const session = await auth.init()
+    expect(session.isAuthenticated).toBe(false)
+    expect(mockAuthorize).toHaveBeenCalledTimes(1)
+    auth.destroy()
+  })
+
+  it('warns when the initial session access token has no future exp', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const auth = createAtolBrowserAuth({
+      issuer: ISSUER,
+      clientId: CLIENT_ID,
+      redirectUri: REDIRECT,
+      allowTestSessions: true,
+      initialTestSession: seedTokens({ access_token: makeJWT({ sub: 'user-1' }) }),
+    })
+    warn.mockClear() // drop the construction warn
+    await auth.init()
     expect(warn.mock.calls.some((c) => /future `exp`/.test(String(c[0])))).toBe(true)
     auth.destroy()
   })
