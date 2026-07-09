@@ -29,8 +29,14 @@ jobs:
           registry-url: "https://registry.npmjs.org"
 
       # actions/setup-node bundles npm 10.x; trusted publishing requires >= 11.5.1.
-      - name: Upgrade npm to a trusted-publishing-capable version
-        run: npm install -g npm@latest
+      # Pinned, NOT npm@latest: npm 12.0.0 (2026-07) ships a broken
+      # `npm publish --provenance` that fails with "Cannot find module
+      # 'sigstore'" (its global install strips the bundled provenance deps).
+      # 11.18.0 is the last 11.x and is proven-good (published 0.1.x/0.3.x).
+      # Bump this deliberately after verifying a newer npm publishes with
+      # provenance; never float it back to @latest.
+      - name: Install a trusted-publishing-capable npm
+        run: npm install -g npm@11.18.0
 
       - name: Install
         run: npm ci
