@@ -1,5 +1,6 @@
 import {
   InMemoryWebStorage,
+  OidcClient,
   User,
   UserManager,
   WebStorageStateStore,
@@ -8,6 +9,22 @@ import {
 } from 'oidc-client-ts'
 import { decodeJWTPayload, getTokenExpiry } from '../claims/claims'
 import type { TokenResponse } from './silent-renew'
+import { LoginRequiredError, OAuthProtocolError } from './token-recovery'
+
+/** Parsed, state-validated redirect result before the token exchange. */
+export interface AuthorizationCodeCallback {
+  code: string
+  codeVerifier: string
+  redirectUri: string
+  nonce: string
+}
+
+/**
+ * Public oidc-client-ts protocol readers paired with each UserManager. This
+ * lets the SDK consume state + PKCE through supported APIs while retaining
+ * control of the DPoP-aware token exchange.
+ */
+const protocolClients = new WeakMap<UserManager, OidcClient>()
 
 /**
  * Create an oidc-client-ts UserManager configured for Atol.
@@ -52,7 +69,76 @@ export function createUserManager(
     extraQueryParams: audience ? { audience } : undefined,
   }
 
-  return new UserManager(settings)
+  const manager = new UserManager(settings)
+  protocolClients.set(manager, new OidcClient(settings))
+  return manager
+}
+
+/**
+ * Consume a redirect callback without letting oidc-client-ts exchange the
+ * code. The matching state is removed exactly once, then the caller performs
+ * the same DPoP-aware exchange used by silent authorization.
+ */
+export async function readAuthorizationCodeCallback(
+  manager: UserManager,
+  url: string,
+): Promise<AuthorizationCodeCallback> {
+  const protocol = protocolClients.get(manager)
+  if (!protocol) {
+    throw new Error('OIDC callback reader is unavailable for this UserManager')
+  }
+
+  let parsed: Awaited<ReturnType<OidcClient['readSigninResponseState']>>
+  try {
+    parsed = await protocol.readSigninResponseState(url, true)
+  } catch (err) {
+    if (err instanceof Error) throw err
+    throw new Error('OIDC callback state could not be read')
+  }
+  const { state, response } = parsed
+  if (state.id !== response.state) {
+    throw new Error('OIDC callback state mismatch')
+  }
+  if (state.request_type !== 'si:r') {
+    throw new Error('OIDC callback has an unexpected request type')
+  }
+  if (state.authority !== protocol.settings.authority) {
+    throw new Error('OIDC callback authority mismatch')
+  }
+  if (state.client_id !== protocol.settings.client_id) {
+    throw new Error('OIDC callback client mismatch')
+  }
+  if (response.error) {
+    const message = response.error_description || response.error
+    if (
+      response.error === 'login_required' ||
+      response.error === 'consent_required' ||
+      response.error === 'interaction_required' ||
+      response.error === 'account_selection_required'
+    ) {
+      throw new LoginRequiredError(message)
+    }
+    throw new OAuthProtocolError(response.error, message)
+  }
+  if (!response.code) {
+    throw new Error('OIDC callback is missing an authorization code')
+  }
+  if (!state.code_verifier) {
+    throw new Error('OIDC callback is missing the PKCE verifier')
+  }
+  if (typeof state.redirect_uri !== 'string' || state.redirect_uri.length === 0) {
+    throw new Error('OIDC callback is missing the redirect URI')
+  }
+  if (typeof state.nonce !== 'string' || state.nonce.length === 0) {
+    throw new Error('OIDC callback is missing the nonce')
+  }
+
+  return {
+    code: response.code,
+    codeVerifier: state.code_verifier,
+    redirectUri: state.redirect_uri,
+    nonce: state.nonce,
+  }
 }
 
 /** Extract the access token from an oidc-client-ts User. */

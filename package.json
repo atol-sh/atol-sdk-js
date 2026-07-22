@@ -1,6 +1,6 @@
 {
   "name": "@atol-sh/js",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Atol core JS SDK - framework-agnostic browser security core: OIDC (PKCE), DPoP, silent renew, permissions, WebCrypto",
   "license": "Apache-2.0",
   "type": "module",
@@ -47,7 +47,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --project tsconfig.tests.json",
     "lint": "tsc --noEmit",
     "clean": "rm -rf dist",
     "prepublishOnly": "npm run typecheck && npm test && npm run build",

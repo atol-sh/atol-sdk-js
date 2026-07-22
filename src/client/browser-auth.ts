@@ -5,8 +5,9 @@
  * proven Atol logic that previously lived only inside the React provider:
  * PKCE authorization-code login, in-memory token storage, DPoP-aware token
  * access, proactive + on-demand silent renewal with single-flight
- * coordination, cross-tab rotation broadcast (authenticated via JWKS), and
- * RP-initiated logout with refresh-token revocation.
+ * coordination, signal-only cross-tab invalidation, organization-scoped
+ * credential transactions, and RP-initiated logout with refresh-token
+ * revocation.
  *
  * Framework bindings (React, Vue, ...) become thin wrappers over this: they
  * subscribe with `onSessionChange` and render, delegating every credential
@@ -24,6 +25,7 @@ import {
   createUserManager,
   getAccessToken,
   getIdToken,
+  readAuthorizationCodeCallback,
   userFromTokenResponse,
 } from '../oidc/oidc'
 import { getTokenExpiry, parseAtolUser } from '../claims/claims'
@@ -31,6 +33,7 @@ import {
   DEFAULT_SILENT_RENEW_RETRY_COUNT,
   LoginRequiredError,
   exchangeCode,
+  generateAuthorizationNonce,
   refreshTokenGrant,
   revokeToken,
   silentAuthorizeWithRetry,
@@ -41,14 +44,13 @@ import {
   backoffDelay,
   classifyRenewalError,
 } from '../oidc/token-recovery'
-import { withTabLock } from '../oidc/cross-tab-lock'
 import {
   createTokenBroadcast,
   type BroadcastMessage,
   type TokenBroadcast,
 } from '../token/token-broadcast'
 import { createDPoPKeyManager, type DPoPKeyManager } from '../dpop/dpop'
-import { verifyIdToken } from '../verify/verify'
+import { verifyAccessToken, verifyIdToken } from '../verify/verify'
 import { decodeJWTPayload } from '../claims/claims'
 import { KEKVault } from '../crypto/kek-vault'
 import { extractKEKFromFragment, kekBase64ToBytes } from '../crypto/encryption'
@@ -72,7 +74,9 @@ export interface AtolBrowserAuthConfig {
   /**
    * Request DPoP-bound tokens (RFC 9449). `true` (or `{ required: true }`)
    * generates a per-tab non-exportable ES256 keypair on init and attaches a
-   * proof to every token-endpoint call. `false` (default) uses Bearer.
+   * proof to every token-endpoint call. `{ required: true }` also makes key
+   * creation failure fatal; boolean `true` retains a Bearer fallback where
+   * WebCrypto is unavailable. `false` (default) uses Bearer.
    */
   dpop?: DPoPConfig
   /**
@@ -116,9 +120,9 @@ export interface AtolBrowserAuthConfig {
   /**
    * TEST ONLY. Enable {@link AtolBrowserAuth.seedTestSession}, which
    * establishes an authenticated session directly from a token response --
-   * WITHOUT an OIDC redirect/callback, and without signature, state, or
-   * nonce validation. Defaults to `false`; while `false`, `seedTestSession`
-   * throws.
+   * WITHOUT an OIDC redirect/callback, and without signature, state, nonce,
+   * or DPoP-binding validation. Defaults to `false`; while `false`,
+   * `seedTestSession` throws.
    *
    * This exists so browser end-to-end tests (Cypress, Playwright) can
    * bootstrap a logged-in session against the in-memory token store without a
@@ -156,6 +160,8 @@ export interface AtolSession {
   isAuthenticated: boolean
   /** The authenticated user, or null. */
   user: AtolUser | null
+  /** Organization to which the current credential pair is scoped. */
+  organizationId?: string
   /**
    * The unwrapped zero-knowledge data-encryption key (DEK), when
    * `deriveEncryptionKey` is enabled and the KEK/wrapped-DEK derivation
@@ -252,6 +258,13 @@ export interface AtolBrowserAuth {
    */
   completeLogin(): Promise<AtolSession>
   /**
+   * Mint a new credential pair scoped to `organizationId`. This is a
+   * distinct prompt=none authorization transaction, never an alias for a
+   * generic renewal. The previous credential pair remains active if the
+   * selection fails.
+   */
+  selectOrganization(organizationId: string): Promise<AtolSession>
+  /**
    * Return the current access token, renewing it when it is inside the 60s
    * expiry window. With `opts.dpop` and DPoP active, also returns a bound
    * proof. Resolves to `undefined` when there is no session.
@@ -305,15 +318,16 @@ export interface AtolBrowserAuth {
   /** Whether DPoP is active (enabled AND WebCrypto produced a key manager). */
   isDPoPActive(): boolean
   /**
-   * Subscribe to session changes (login, logout, renewal, cross-tab
-   * rotation). The callback fires immediately with the current session, and
+   * Subscribe to session changes (login, logout, renewal, organization
+   * selection, or a cross-tab lifecycle signal). The callback fires
+   * immediately with the current session, and
    * again on every subsequent change. Returns an unsubscribe function.
    */
   onSessionChange(cb: (session: AtolSession) => void): () => void
   /**
    * TEST ONLY. Establish an authenticated session directly from a raw token
    * response, bypassing the OIDC redirect/callback and all signature, state,
-   * and nonce checks. Throws unless the client was created with
+   * nonce, and DPoP-binding checks. Throws unless the client was created with
    * `allowTestSessions: true` (see {@link AtolBrowserAuthConfig.allowTestSessions}).
    *
    * The tokens are adopted through the same path a real login/renewal uses:
@@ -334,10 +348,22 @@ export interface AtolBrowserAuth {
 const DEFAULT_SCOPES = 'openid profile email'
 /** Renew when the access token is within this window of expiry. */
 const RENEW_WINDOW_MS = 60_000
+const CANONICAL_ULID = /^[0-7][0-9A-HJKMNP-TV-Z]{25}$/
 
 function dpopEnabled(cfg: DPoPConfig | undefined): boolean {
   if (typeof cfg === 'boolean') return cfg
   return cfg?.required === true
+}
+
+function dpopRequired(cfg: DPoPConfig | undefined): boolean {
+  return typeof cfg === 'object' && cfg.required === true
+}
+
+class StaleCredentialTransactionError extends Error {
+  constructor() {
+    super('credential transaction was superseded')
+    this.name = 'StaleCredentialTransactionError'
+  }
 }
 
 /**
@@ -368,6 +394,7 @@ export function createAtolBrowserAuth(config: AtolBrowserAuthConfig): AtolBrowse
   const audience = config.audience
   const redirectUri = config.redirectUri
   const useDPoP = dpopEnabled(config.dpop)
+  const requireDPoP = dpopRequired(config.dpop)
   const useRefreshTokens = config.useRefreshTokens ?? false
   const useRefreshTokensFallback = config.useRefreshTokensFallback ?? false
   const deriveEncryptionKey = config.deriveEncryptionKey ?? false
@@ -404,6 +431,7 @@ export function createAtolBrowserAuth(config: AtolBrowserAuthConfig): AtolBrowse
   // Session state.
   let currentUser: AtolUser | null = null
   let currentIdToken: string | undefined
+  let currentOrganizationId: string | undefined
   let accessToken: string | undefined
   let refreshToken: string | undefined
 
@@ -424,9 +452,14 @@ export function createAtolBrowserAuth(config: AtolBrowserAuthConfig): AtolBrowse
   let dpop: DPoPKeyManager | null = null
   let broadcast: TokenBroadcast | null = null
   let renewTimer: ReturnType<typeof setTimeout> | null = null
-  let renewInFlight: Promise<string | undefined> | null = null
+  let renewInFlight: {
+    epoch: number
+    promise: Promise<string | undefined>
+  } | null = null
   let renewBackoff = 0
-  let restoreInFlight: Promise<TokenResponse> | null = null
+  let restoreInFlight: Promise<SilentCredentialGrant> | null = null
+  let runtimeInitPromise: Promise<void> | null = null
+  let credentialEpoch = 0
   let destroyed = false
 
   const subscribers = new Set<(session: AtolSession) => void>()
@@ -435,6 +468,7 @@ export function createAtolBrowserAuth(config: AtolBrowserAuthConfig): AtolBrowse
     return {
       isAuthenticated: currentUser !== null,
       user: currentUser,
+      organizationId: currentOrganizationId,
       encryptionKey: encKey,
       encryptionError: encError,
     }
@@ -578,49 +612,233 @@ export function createAtolBrowserAuth(config: AtolBrowserAuthConfig): AtolBrowse
     const baseDelay = Math.max(0, exp - RENEW_WINDOW_MS - Date.now())
     const delay = baseDelay + backoffDelay(renewBackoff)
     renewTimer = setTimeout(() => {
-      if (!renewInFlight) {
-        renewInFlight = renewOnce()
-          .catch(() => undefined)
-          .finally(() => {
-            renewInFlight = null
-          })
-      }
+      void renewSingleFlight(false, true).catch(() => undefined)
     }, delay)
   }
 
+  interface ApplyTokenOptions {
+    /** Skip signature and proof-binding checks only for the explicit test seam. */
+    testSession?: boolean
+    /** Organization requested by a selectOrganization transaction. */
+    expectedOrganizationId?: string
+    /** Compare against expectedOrganizationId even when it is undefined. */
+    enforceExpectedOrganization?: boolean
+    /** Existing ID/refresh tokens may be retained only for an ordinary renewal. */
+    preserveExistingTokens?: boolean
+    /** Reject the commit when a newer credential transaction has started. */
+    epoch?: number
+    /** OIDC nonce read from the matching redirect state. */
+    expectedNonce?: string
+    /** Invalidate same-epoch background work at an exclusive commit. */
+    advanceEpochOnCommit?: boolean
+  }
+
+  interface PreparedCredentials {
+    accessToken: string
+    idToken: string
+    refreshToken?: string
+    tokenType: string
+    organizationId?: string
+    user: AtolUser
+  }
+
+  interface SilentCredentialGrant {
+    tokens: TokenResponse
+    nonce: string
+  }
+
+  function organizationClaim(
+    claims: Record<string, unknown>,
+    tokenName: string,
+    requireCanonical: boolean,
+  ): string | undefined {
+    const value = claims['atol:org_id']
+    if (value === undefined) return undefined
+    if (typeof value !== 'string' || value.length === 0) {
+      throw new Error(`${tokenName} has an invalid organization claim`)
+    }
+    if (requireCanonical && !CANONICAL_ULID.test(value)) {
+      throw new Error(`${tokenName} organization claim is not a canonical ULID`)
+    }
+    return value
+  }
+
   /**
-   * Apply a token response to session state + the oidc-client-ts store,
-   * derive the encryption key (when enabled), then emit. Async because DEK
-   * derivation is async and must complete before we emit so subscribers see
-   * the key in the same session payload.
+   * Validate a complete candidate before touching live credential state.
+   * Access-token proof binding is checked only on the access token; the ID
+   * token is verified as OIDC identity evidence and must agree on subject
+   * and organization.
    */
-  async function applyTokens(tokens: TokenResponse): Promise<void> {
-    accessToken = tokens.access_token
-    // Only retain a refresh token when the caller opted into the
-    // refresh-token renewal strategy. In the default iframe model a stray
-    // server-issued RT is dropped -- neither kept in memory nor persisted to
-    // the oidc-client-ts store -- so renewal stays on the iframe path.
-    const stored = useRefreshTokens ? tokens : { ...tokens, refresh_token: undefined }
-    if (useRefreshTokens && tokens.refresh_token) {
-      refreshToken = tokens.refresh_token
+  async function prepareCredentials(
+    tokens: TokenResponse,
+    options: ApplyTokenOptions,
+  ): Promise<PreparedCredentials> {
+    let accessClaims: Record<string, unknown>
+    if (options.testSession) {
+      try {
+        accessClaims = decodeJWTPayload(tokens.access_token)
+      } catch {
+        throw new Error('token response contains an invalid access token')
+      }
+    } else {
+      accessClaims = (await verifyAccessToken(tokens.access_token, {
+        authority: issuer,
+        audience: audience ?? issuer,
+      })) as Record<string, unknown>
     }
-    void manager.storeUser(userFromTokenResponse(stored)).catch(() => undefined)
-    if (tokens.id_token) {
-      currentIdToken = tokens.id_token
-      currentUser = toUser(tokens.id_token)
+
+    if (!options.testSession) {
+      if (typeof tokens.token_type !== 'string' || tokens.token_type.length === 0) {
+        throw new Error('token response is missing token_type')
+      }
+      const tokenType = tokens.token_type.toLowerCase()
+      if (dpop) {
+        if (tokenType !== 'dpop') {
+          throw new Error('DPoP token exchange returned a non-DPoP access token')
+        }
+        const cnf = accessClaims.cnf
+        const jkt =
+          cnf && typeof cnf === 'object'
+            ? (cnf as Record<string, unknown>).jkt
+            : undefined
+        if (typeof jkt !== 'string' || jkt !== (await dpop.thumbprint())) {
+          throw new Error('DPoP access token is not bound to this tab key')
+        }
+      } else if (tokenType === 'dpop') {
+        throw new Error('received a DPoP access token without a local DPoP key')
+      }
     }
+
+    const idToken =
+      tokens.id_token ?? (options.preserveExistingTokens ? currentIdToken : undefined)
+    if (!idToken) {
+      throw new Error('token response is missing an ID token')
+    }
+
+    let idClaims: Record<string, unknown>
+    if (options.testSession) {
+      try {
+        idClaims = decodeJWTPayload(idToken)
+      } catch {
+        throw new Error('token response contains an invalid ID token')
+      }
+    } else if (!tokens.id_token && options.preserveExistingTokens && currentIdToken === idToken) {
+      // The existing ID token was verified before it entered live state.
+      idClaims = decodeJWTPayload(idToken)
+    } else {
+      idClaims = (await verifyIdToken(idToken, {
+        authority: issuer,
+        clientId,
+        nonce: options.expectedNonce,
+      })) as Record<string, unknown>
+    }
+
+    const accessSubject = accessClaims.sub
+    const idSubject = idClaims.sub
+    if (
+      typeof accessSubject !== 'string' ||
+      accessSubject.length === 0 ||
+      typeof idSubject !== 'string' ||
+      idSubject.length === 0 ||
+      accessSubject !== idSubject
+    ) {
+      throw new Error('access and ID token subjects do not match')
+    }
+    if (currentUser && currentUser.id !== idSubject) {
+      throw new Error('new credentials changed the authenticated subject')
+    }
+
+    const accessOrganizationId = organizationClaim(
+      accessClaims,
+      'access token',
+      !options.testSession,
+    )
+    const idOrganizationId = organizationClaim(idClaims, 'ID token', !options.testSession)
+    if (accessOrganizationId !== idOrganizationId) {
+      throw new Error('access and ID token organization mismatch')
+    }
+    if (
+      options.enforceExpectedOrganization &&
+      accessOrganizationId !== options.expectedOrganizationId
+    ) {
+      throw new Error('token organization does not match the requested organization')
+    }
+
+    const user = toUser(idToken)
+    if (!user) throw new Error('ID token has no usable subject')
+
+    return {
+      accessToken: tokens.access_token,
+      idToken,
+      refreshToken: useRefreshTokens
+        ? (tokens.refresh_token ??
+          (options.preserveExistingTokens ? refreshToken : undefined))
+        : undefined,
+      tokenType: tokens.token_type,
+      organizationId: accessOrganizationId,
+      user,
+    }
+  }
+
+  /**
+   * Validate, then atomically replace the live credential pair. Validation
+   * and all asynchronous proof/JWKS work happens before any assignment, so a
+   * failed or superseded organization grant cannot leave mixed credentials.
+   */
+  async function applyTokens(
+    tokens: TokenResponse,
+    options: ApplyTokenOptions = {},
+  ): Promise<void> {
+    if (destroyed) {
+      throw new Error('auth client has been destroyed')
+    }
+    if (options.epoch !== undefined && options.epoch !== credentialEpoch) {
+      throw new StaleCredentialTransactionError()
+    }
+    const prepared = await prepareCredentials(tokens, options)
+    if (destroyed) {
+      throw new Error('auth client has been destroyed')
+    }
+    if (options.epoch !== undefined && options.epoch !== credentialEpoch) {
+      throw new StaleCredentialTransactionError()
+    }
+    if (options.advanceEpochOnCommit) credentialEpoch++
+
+    accessToken = prepared.accessToken
+    currentIdToken = prepared.idToken
+    refreshToken = prepared.refreshToken
+    currentOrganizationId = prepared.organizationId
+    currentUser = prepared.user
+
+    const stored: TokenResponse = {
+      ...tokens,
+      access_token: prepared.accessToken,
+      id_token: prepared.idToken,
+      refresh_token: prepared.refreshToken,
+      token_type: prepared.tokenType,
+    }
+    void manager
+      .storeUser(userFromTokenResponse(stored))
+      .then(() => (destroyed ? manager.removeUser() : undefined))
+      .catch(() => undefined)
     scheduleRenew()
     await deriveEncKey()
+    if (destroyed) {
+      zeroEncKey()
+      throw new Error('auth client has been destroyed')
+    }
     emit()
   }
 
   /** Clear all local session state (terminal auth failure / logout). */
   function clearSession(): void {
+    credentialEpoch++
     clearRenewTimer()
     accessToken = undefined
     refreshToken = undefined
     currentUser = null
     currentIdToken = undefined
+    currentOrganizationId = undefined
     // Drop the derived encryption key + error and best-effort zero the DEK
     // buffer. The vault record is wiped on logout (see logout()); a terminal
     // renewal failure keeps the vault so a subsequent silent restore can
@@ -631,216 +849,242 @@ export function createAtolBrowserAuth(config: AtolBrowserAuthConfig): AtolBrowse
     emit()
   }
 
-  /** Silent renew via the iframe + web_message flow (raw tokens). */
-  async function renewViaIframe(): Promise<TokenResponse> {
+  /** Silent renew via iframe, preserving the transaction nonce with its tokens. */
+  async function renewViaIframe(organizationId?: string): Promise<SilentCredentialGrant> {
     const result = await silentAuthorizeWithRetry(
-      { authority: issuer, clientId, redirectUri, scope, audience, deriveEncryptionKey },
+      {
+        authority: issuer,
+        clientId,
+        redirectUri,
+        scope,
+        audience,
+        organizationId,
+        deriveEncryptionKey,
+      },
       DEFAULT_SILENT_RENEW_RETRY_COUNT,
     )
-    return exchangeCode(
-      issuer,
-      clientId,
-      result.code,
-      redirectUri,
-      result.codeVerifier,
-      dpop ?? undefined,
-    )
+    const tokens = await exchangeCode(
+        issuer,
+        clientId,
+        result.code,
+        redirectUri,
+        result.codeVerifier,
+        dpop ?? undefined,
+      )
+    return { tokens, nonce: result.nonce }
   }
 
   /**
-   * Run the renew once, under a cross-tab lock so simultaneous tabs collapse
-   * to a single /auth/token POST. Broadcasts the rotated tokens. Terminal
-   * auth errors clear the session; transient errors re-throw for backoff.
+   * Run one tab-local renewal. Proof-bound credentials cannot be shared
+   * across tabs, so coordination is signal-only and each tab renews with its
+   * own DPoP key. The epoch guard prevents an older generic renewal from
+   * overwriting a newer organization selection.
    */
-  async function renewOnce(force = false): Promise<string | undefined> {
-    const lockName = `atol:renew:${issuer}:${clientId}`
-    return withTabLock(lockName, 30_000, async () => {
-      if (!force && accessToken) {
-        const exp = getTokenExpiry(accessToken)
-        if (exp !== null && Date.now() < exp - RENEW_WINDOW_MS) {
-          return accessToken
+  async function renewOnce(
+    force: boolean,
+    startEpoch: number,
+    publishSignal: boolean,
+  ): Promise<string | undefined> {
+    const startingAccessToken = accessToken
+    const startingRefreshToken = refreshToken
+    const startingOrganizationId = currentOrganizationId
+
+    if (!force && startingAccessToken) {
+      const exp = getTokenExpiry(startingAccessToken)
+      if (exp !== null && Date.now() < exp - RENEW_WINDOW_MS) {
+        return startingAccessToken
+      }
+    }
+
+    try {
+      let tokens: TokenResponse
+      let expectedNonce: string | undefined
+      if (useRefreshTokens && startingRefreshToken) {
+        try {
+          tokens = await refreshTokenGrant(
+            issuer,
+            clientId,
+            startingRefreshToken,
+            scope,
+            audience,
+            dpop ?? undefined,
+          )
+        } catch (grantErr) {
+          if (
+            !useRefreshTokensFallback ||
+            classifyRenewalError(grantErr) !== RecoveryAction.Retry
+          ) {
+            throw grantErr
+          }
+          const grant = await renewViaIframe(startingOrganizationId)
+          tokens = grant.tokens
+          expectedNonce = grant.nonce
         }
+      } else {
+        const grant = await renewViaIframe(startingOrganizationId)
+        tokens = grant.tokens
+        expectedNonce = grant.nonce
       }
 
-      try {
-        let tokens: TokenResponse
-        if (useRefreshTokens && refreshToken) {
-          try {
-            tokens = await refreshTokenGrant(
-              issuer,
-              clientId,
-              refreshToken,
-              scope,
-              audience,
-              dpop ?? undefined,
-            )
-          } catch (grantErr) {
-            // A TRANSIENT refresh-token grant failure (network blip, 5xx,
-            // 429) can fall back to the hidden-iframe path once when the
-            // caller opted in via useRefreshTokensFallback. Terminal auth
-            // failures (invalid_grant / login_required -> ForceReauth) and
-            // programmer errors (Surface) are re-thrown to the outer catch,
-            // which clears the session, so a dead refresh token never
-            // silently degrades into an iframe renew.
-            if (
-              !useRefreshTokensFallback ||
-              classifyRenewalError(grantErr) !== RecoveryAction.Retry
-            ) {
-              throw grantErr
-            }
-            tokens = await renewViaIframe()
-          }
-        } else {
-          tokens = await renewViaIframe()
-        }
-        await applyTokens(tokens)
+      if (startEpoch !== credentialEpoch) return accessToken
+      await applyTokens(tokens, {
+        epoch: startEpoch,
+        expectedOrganizationId: startingOrganizationId,
+        enforceExpectedOrganization: true,
+        preserveExistingTokens: true,
+        expectedNonce,
+      })
 
-        if (broadcast) {
-          const exp =
-            getTokenExpiry(tokens.access_token) ??
-            Date.now() + (tokens.expires_in ?? 3600) * 1000
-          broadcast.publish({
-            type: 'token-rotated',
-            accessToken: tokens.access_token,
-            idToken: tokens.id_token,
-            // Only carry a refresh token cross-tab in the refresh-token
-            // model; in the iframe model each tab renews on its own.
-            refreshToken: useRefreshTokens ? tokens.refresh_token : undefined,
-            expiresAt: exp,
-            sentAt: Date.now(),
-          })
-        }
-
-        renewBackoff = 0
-        return tokens.access_token
-      } catch (err) {
-        switch (classifyRenewalError(err)) {
-          case RecoveryAction.ForceReauth: {
-            clearSession()
-            if (broadcast) {
-              broadcast.publish({ type: 'session-expired', sentAt: Date.now() })
-            }
-            return undefined
-          }
-          case RecoveryAction.Retry: {
-            renewBackoff = Math.min(10, renewBackoff + 1)
-            throw err
-          }
-          case RecoveryAction.Surface:
-          default:
-            throw err
-        }
+      if (publishSignal && broadcast) {
+        broadcast.publish({ type: 'credentials-invalidated', sentAt: Date.now() })
       }
+      renewBackoff = 0
+      return tokens.access_token
+    } catch (err) {
+      if (err instanceof StaleCredentialTransactionError || startEpoch !== credentialEpoch) {
+        return accessToken
+      }
+      switch (classifyRenewalError(err)) {
+        case RecoveryAction.ForceReauth: {
+          clearSession()
+          if (publishSignal && broadcast) {
+            broadcast.publish({ type: 'session-ended', sentAt: Date.now() })
+          }
+          return undefined
+        }
+        case RecoveryAction.Retry: {
+          renewBackoff = Math.min(10, renewBackoff + 1)
+          throw err
+        }
+        case RecoveryAction.Surface:
+        default:
+          throw err
+      }
+    }
+  }
+
+  function renewSingleFlight(
+    force: boolean,
+    publishSignal: boolean,
+  ): Promise<string | undefined> {
+    const epoch = credentialEpoch
+    if (renewInFlight?.epoch === epoch) return renewInFlight.promise
+
+    const promise = renewOnce(force, epoch, publishSignal).finally(() => {
+      if (renewInFlight?.promise === promise) renewInFlight = null
     })
+    renewInFlight = { epoch, promise }
+    return promise
   }
 
   /** Return the current token, renewing when stale. Dedupes concurrent calls. */
   async function getToken(): Promise<string | undefined> {
-    if (accessToken) {
-      const exp = getTokenExpiry(accessToken)
-      if (exp !== null && Date.now() < exp - RENEW_WINDOW_MS) {
-        return accessToken
-      }
-    } else {
-      const stored = getAccessToken((await manager.getUser()) ?? null)
-      if (stored) {
-        const exp = getTokenExpiry(stored)
-        if (exp !== null && Date.now() < exp - RENEW_WINDOW_MS) {
-          return stored
-        }
-      } else {
-        return undefined
-      }
+    if (!accessToken) return undefined
+    const exp = getTokenExpiry(accessToken)
+    if (exp !== null && Date.now() < exp - RENEW_WINDOW_MS) {
+      return accessToken
     }
-    if (!renewInFlight) {
-      renewInFlight = renewOnce().finally(() => {
-        renewInFlight = null
-      })
-    }
-    return renewInFlight
+    return renewSingleFlight(false, true)
   }
 
-  /**
-   * Cross-tab broadcast handler: adopt rotated tokens only after
-   * authenticating the ID token (signature, issuer, audience) against the
-   * IdP JWKS and pinning the subject. Never trust a raw channel message.
-   */
+  /** Receive lifecycle signals only; credentials never cross the channel. */
   async function onBroadcast(message: BroadcastMessage): Promise<void> {
-    if (message.type === 'session-expired') {
-      // Re-verify with the server rather than trusting the message: a forged
-      // session-expired is a no-op because forceRenew only clears when the
-      // refresh token is actually dead.
-      void forceRenew()
+    if (message.type === 'session-ended') {
+      clearSession()
       return
     }
-    const rotated = message
-    // Forward-progress only.
-    if (accessToken) {
-      const existingExp = getTokenExpiry(accessToken)
-      if (existingExp !== null && existingExp >= rotated.expiresAt) return
-    }
-    if (!rotated.idToken) return
-    let claims
-    try {
-      claims = await verifyIdToken(rotated.idToken, { authority: issuer, clientId })
-    } catch {
-      return // Unverifiable -> never adopt.
-    }
-    // Identity pinning: a broadcast must not switch the active user.
-    if (currentUser && claims.sub !== currentUser.id) return
-
-    // Under DPoP each tab owns its own key, so the leader's refresh token is
-    // bound to a different cnf.jkt. Adopting it would poison the family on
-    // the next renew. Drop the RT under DPoP; keep it otherwise.
-    const dpopActive = dpop !== null
-    await applyTokens({
-      access_token: rotated.accessToken,
-      id_token: rotated.idToken,
-      refresh_token: dpopActive ? undefined : rotated.refreshToken,
-      token_type: 'bearer',
-      expires_in: Math.max(0, Math.floor((rotated.expiresAt - Date.now()) / 1000)),
-    })
+    if (!currentUser) return
+    await renewSingleFlight(true, false).catch(() => undefined)
   }
 
   async function forceRenew(): Promise<string | undefined> {
-    if (!renewInFlight) {
-      renewInFlight = renewOnce(true).finally(() => {
-        renewInFlight = null
-      })
-    }
-    return renewInFlight
+    return renewSingleFlight(true, true)
   }
 
   function isCallbackUrl(): boolean {
     if (typeof window === 'undefined') return false
-    const s = window.location.search
-    return s.includes('code=') || s.includes('error=')
+    const params = new URLSearchParams(window.location.search)
+    return params.has('code') || params.has('error')
   }
 
-  async function completeLogin(): Promise<AtolSession> {
-    if (!isCallbackUrl()) return session()
-    const oidcUser = await manager.signinRedirectCallback()
-    await adoptOidcUser(oidcUser)
-    // Clean the code/state out of the address bar.
-    if (typeof window !== 'undefined') {
-      window.history.replaceState({}, document.title, window.location.pathname)
-    }
-    return session()
+  /**
+   * Install all tab-local credential machinery exactly once. Public callback
+   * completion and init share this gate so neither can exchange a code before
+   * required DPoP state exists.
+   */
+  function ensureRuntimeInitialized(): Promise<void> {
+    if (runtimeInitPromise) return runtimeInitPromise
+    runtimeInitPromise = (async () => {
+      if (destroyed) throw new Error('auth client has been destroyed')
+
+      // Capture the one-shot fragment before callback cleanup can remove it.
+      if (deriveEncryptionKey) {
+        fragmentKEK = extractKEKFromFragment()
+      }
+      if (useDPoP) {
+        const initializedDPoP = await createDPoPKeyManager()
+        if (destroyed) throw new Error('auth client has been destroyed')
+        dpop = initializedDPoP
+        if (!initializedDPoP && requireDPoP) {
+          throw new Error('DPoP is required but WebCrypto could not create a key')
+        }
+      }
+      if (destroyed) throw new Error('auth client has been destroyed')
+      broadcast = createTokenBroadcast(`atol:tokens:${issuer}:${clientId}`)
+      broadcast.subscribe((message) => {
+        void onBroadcast(message)
+      })
+    })()
+    return runtimeInitPromise
+  }
+
+  let completeLoginPromise: Promise<AtolSession> | null = null
+
+  function completeLogin(): Promise<AtolSession> {
+    if (!isCallbackUrl()) return Promise.resolve(session())
+    if (completeLoginPromise) return completeLoginPromise
+
+    const completion = (async (): Promise<AtolSession> => {
+      try {
+        await ensureRuntimeInitialized()
+        const callback = await readAuthorizationCodeCallback(manager, window.location.href)
+        const tokens = await exchangeCode(
+          issuer,
+          clientId,
+          callback.code,
+          callback.redirectUri,
+          callback.codeVerifier,
+          dpop ?? undefined,
+        )
+        await applyTokens(tokens, { expectedNonce: callback.nonce })
+        return session()
+      } catch {
+        clearSession()
+        throw new Error('OIDC callback failed. Please sign in again.')
+      } finally {
+        if (typeof window !== 'undefined') {
+          window.history.replaceState({}, document.title, window.location.pathname)
+        }
+      }
+    })().finally(() => {
+      if (completeLoginPromise === completion) completeLoginPromise = null
+    })
+    completeLoginPromise = completion
+    return completion
   }
 
   /** Adopt an oidc-client-ts User into session state. */
   async function adoptOidcUser(oidcUser: User): Promise<void> {
-    accessToken = getAccessToken(oidcUser)
-    // Only adopt a refresh token under the refresh-token strategy; the
-    // default iframe model never renews from a stored RT.
-    if (useRefreshTokens && oidcUser.refresh_token) {
-      refreshToken = oidcUser.refresh_token
-    }
-    currentIdToken = getIdToken(oidcUser)
-    currentUser = toUser(currentIdToken)
-    scheduleRenew()
-    await deriveEncKey()
-    emit()
+    const storedAccessToken = getAccessToken(oidcUser)
+    if (!storedAccessToken) throw new Error('stored OIDC user has no access token')
+    await applyTokens({
+      access_token: storedAccessToken,
+      id_token: getIdToken(oidcUser),
+      refresh_token: oidcUser.refresh_token,
+      token_type: oidcUser.token_type,
+      expires_in: oidcUser.expires_in ?? 0,
+      scope: oidcUser.scope,
+    })
   }
 
   async function restoreSession(): Promise<void> {
@@ -851,19 +1095,19 @@ export function createAtolBrowserAuth(config: AtolBrowserAuthConfig): AtolBrowse
         if (!restoreInFlight) {
           restoreInFlight = renewViaIframe()
         }
-        const tokens = await restoreInFlight
-        // In the iframe model, drop any stray RT before it reaches the store.
-        oidcUser = userFromTokenResponse(
-          useRefreshTokens ? tokens : { ...tokens, refresh_token: undefined },
-        )
-        await manager.storeUser(oidcUser)
+        const grant = await restoreInFlight
+        await applyTokens(grant.tokens, { expectedNonce: grant.nonce })
+        return
       } catch (err) {
         // login_required is the normal "no IdP session" answer.
-        if (!(err instanceof LoginRequiredError)) {
-          // Non-terminal restore failures are swallowed: the on-demand path
-          // retries on the next getAccessToken. Never log token material.
+        if (err instanceof LoginRequiredError) {
+          oidcUser = null
+        } else {
+          // A discovery, CORS, network, or validation failure is not evidence
+          // that the user signed out. Surface it so the host can render a
+          // retryable error instead of silently changing session state.
+          throw err
         }
-        oidcUser = null
       } finally {
         restoreInFlight = null
       }
@@ -880,26 +1124,7 @@ export function createAtolBrowserAuth(config: AtolBrowserAuthConfig): AtolBrowse
   async function init(): Promise<AtolSession> {
     if (initPromise) return initPromise
     initPromise = (async () => {
-      // Capture the zero-knowledge KEK from the URL fragment FIRST, before
-      // anything touches the URL. On a fresh login-callback the Atol
-      // authorize endpoint delivers the KEK in the fragment
-      // (`#atol_enc_key=...`) alongside the `?code=` query; completeLogin
-      // strips the query below and extractKEKFromFragment strips the
-      // fragment here, so this must run before either. Gated on the option:
-      // when off, the fragment is never read. The captured KEK is consumed
-      // once by deriveEncKey() to provision the vault.
-      if (deriveEncryptionKey) {
-        fragmentKEK = extractKEKFromFragment()
-      }
-      // DPoP key install (best-effort; null => Bearer).
-      if (useDPoP) {
-        dpop = await createDPoPKeyManager()
-      }
-      // Cross-tab broadcast wiring.
-      broadcast = createTokenBroadcast(`atol:tokens:${issuer}:${clientId}`)
-      broadcast.subscribe((message) => {
-        void onBroadcast(message)
-      })
+      await ensureRuntimeInitialized()
       // TEST ONLY: adopt a pre-supplied session deterministically and skip the
       // restore entirely -- no redirect-callback handling, no silent-renew
       // iframe. Gated on allowTestSessions (initialTestSession is undefined
@@ -908,18 +1133,12 @@ export function createAtolBrowserAuth(config: AtolBrowserAuthConfig): AtolBrowse
       // block against a stubbed backend with no IdP.
       if (initialTestSession) {
         warnIfSeedTokenNotFresh(initialTestSession.access_token)
-        await applyTokens(initialTestSession)
+        await applyTokens(initialTestSession, { testSession: true })
         return session()
       }
       // Restore or complete-login.
       if (isCallbackUrl()) {
-        try {
-          await completeLogin()
-        } catch {
-          // A stale/failed callback settles unauthenticated; the caller can
-          // retry beginLogin. Never surface token material in the error.
-          clearSession()
-        }
+        await completeLogin()
       } else {
         await restoreSession()
       }
@@ -947,6 +1166,7 @@ export function createAtolBrowserAuth(config: AtolBrowserAuthConfig): AtolBrowse
           ? `${window.location.origin}${options.returnTo}`
           : redirectUri,
       extraQueryParams,
+      nonce: generateAuthorizationNonce(),
     })
   }
 
@@ -964,18 +1184,50 @@ export function createAtolBrowserAuth(config: AtolBrowserAuthConfig): AtolBrowse
     })
   }
 
+  async function selectOrganization(organizationId: string): Promise<AtolSession> {
+    if (!CANONICAL_ULID.test(organizationId)) {
+      throw new Error('organizationId must be a canonical ULID')
+    }
+    if (!currentUser) {
+      throw new Error('cannot select an organization without an authenticated session')
+    }
+
+    // A selection is its own credential transaction. Advancing the epoch
+    // immediately makes any older generic renewal result ineligible to
+    // commit, while leaving the current pair live until the new pair has
+    // passed every validation check.
+    const selectionEpoch = ++credentialEpoch
+    clearRenewTimer()
+    try {
+      const grant = await renewViaIframe(organizationId)
+      await applyTokens(grant.tokens, {
+        epoch: selectionEpoch,
+        expectedOrganizationId: organizationId,
+        enforceExpectedOrganization: true,
+        preserveExistingTokens: false,
+        expectedNonce: grant.nonce,
+        advanceEpochOnCommit: true,
+      })
+      if (broadcast) {
+        broadcast.publish({ type: 'credentials-invalidated', sentAt: Date.now() })
+      }
+      return session()
+    } catch (err) {
+      // The previous credential pair was never mutated, so it remains safe
+      // to use. Re-arm its timer before surfacing the failed selection.
+      if (selectionEpoch === credentialEpoch) scheduleRenew()
+      throw err
+    }
+  }
+
   async function logout(): Promise<void> {
     // Best-effort refresh-token revocation (RFC 7009) before we drop it.
     if (refreshToken) {
       await revokeToken(issuer, clientId, refreshToken).catch(() => undefined)
     }
-    // Look up the id_token_hint for RP-initiated logout validation.
-    let idTokenHint: string | undefined
-    try {
-      const u = await manager.getUser()
-      idTokenHint = u?.id_token ?? undefined
-    } catch {
-      // getUser failure must not block logout.
+    const idTokenHint = currentIdToken
+    if (broadcast) {
+      broadcast.publish({ type: 'session-ended', sentAt: Date.now() })
     }
     clearSession()
     // Wipe the device-bound KEK vault so the next visit to this origin does
@@ -1020,9 +1272,10 @@ export function createAtolBrowserAuth(config: AtolBrowserAuthConfig): AtolBrowse
       // Deny by default. Without the opt-in this method is inert, so an XSS
       // payload in a production build cannot use it to forge a session.
       throw new Error(
-        'seedTestSession is disabled: pass allowTestSessions:true to ' +
+          'seedTestSession is disabled: pass allowTestSessions:true to ' +
           'createAtolBrowserAuth to enable it. It bypasses OIDC signature, ' +
-          'state, and nonce validation and must never be enabled in production.',
+          'state, nonce, and DPoP-binding validation and must never be enabled ' +
+          'in production.',
       )
     }
     // A seeded access token needs a FUTURE `exp`: applyTokens schedules
@@ -1034,7 +1287,7 @@ export function createAtolBrowserAuth(config: AtolBrowserAuthConfig): AtolBrowse
     // store the user in-memory, set the current user/id token from the id
     // token, honor the refresh-token retention policy, schedule renewal, and
     // emit so subscribers (a framework binding) flip to authenticated.
-    await applyTokens(tokens)
+    await applyTokens(tokens, { testSession: true })
     return session()
   }
 
@@ -1054,6 +1307,7 @@ export function createAtolBrowserAuth(config: AtolBrowserAuthConfig): AtolBrowse
   function destroy(): void {
     if (destroyed) return
     destroyed = true
+    credentialEpoch++
     clearRenewTimer()
     if (broadcast) {
       broadcast.close()
@@ -1061,6 +1315,12 @@ export function createAtolBrowserAuth(config: AtolBrowserAuthConfig): AtolBrowse
     }
     subscribers.clear()
     dpop = null
+    accessToken = undefined
+    refreshToken = undefined
+    currentUser = null
+    currentIdToken = undefined
+    currentOrganizationId = undefined
+    void manager.removeUser().catch(() => undefined)
     // Best-effort zero the DEK buffer and drop derived encryption state.
     zeroEncKey()
     encError = undefined
@@ -1071,6 +1331,7 @@ export function createAtolBrowserAuth(config: AtolBrowserAuthConfig): AtolBrowse
     beginLogin,
     stepUp,
     completeLogin,
+    selectOrganization,
     getAccessToken: getAccessTokenPublic,
     getIdToken: () => currentIdToken,
     getEncryptionKey: () => encKey,

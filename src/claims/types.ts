@@ -21,15 +21,6 @@ export interface AtolUser {
   /** User's display name. */
   name: string
 
-  /** Organization ID (atol:org_id claim). */
-  orgId: string
-
-  /** Organization's subscription plan (atol:plan claim). */
-  plan: string
-
-  /** User's roles within the organization (atol:roles claim). */
-  roles: string[]
-
   /** How the user authenticated (atol:auth_method claim). */
   authMethod: string
 

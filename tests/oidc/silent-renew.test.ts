@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach, afterAll, beforeAll } from "vitest"
+import { describe, it, expect, vi, afterEach, afterAll, beforeAll } from "vitest"
 import { webcrypto as nodeWebCrypto } from "node:crypto"
 import {
   silentAuthorize,
@@ -40,9 +40,9 @@ function postAuthResponse(
     new MessageEvent("message", {
       data: { type: "authorization_response", response },
       origin,
+      source: iframe.contentWindow,
     }),
   )
-  void iframe
 }
 
 const AUTHORITY = "http://atol.localhost:9080"
@@ -52,6 +52,7 @@ const BASE_OPTS = {
   redirectUri: "http://app.localhost:3000/callback",
   scope: "openid profile email",
 }
+const ORGANIZATION_ID = "01KV4BNVMVG66Q04WGMMD6W4PB"
 
 /** base64url(SHA-256(verifier)) -- the expected S256 code_challenge. */
 async function s256(verifier: string): Promise<string> {
@@ -93,6 +94,8 @@ describe("silentAuthorize -- PKCE + authorize URL", () => {
 
     const state = url.searchParams.get("state")!
     expect(state).toMatch(/^[0-9a-f]{64}$/) // 32 random bytes hex-encoded
+    const nonce = url.searchParams.get("nonce")!
+    expect(nonce).toMatch(/^[0-9a-f]{64}$/)
     const challenge = url.searchParams.get("code_challenge")!
     expect(challenge).not.toMatch(/[+/=]/) // base64url, unpadded
 
@@ -101,6 +104,7 @@ describe("silentAuthorize -- PKCE + authorize URL", () => {
     postAuthResponse(iframe, AUTHORITY, { code: "authcode", state })
     const result = await p
     expect(await s256(result.codeVerifier)).toBe(challenge)
+    expect(result.nonce).toBe(nonce)
   })
 
   it("includes audience + derive_encryption_key when configured", async () => {
@@ -121,6 +125,28 @@ describe("silentAuthorize -- PKCE + authorize URL", () => {
     await p
   })
 
+  it("[R10] binds a requested organization to the prompt=none authorization", async () => {
+    type OrganizationAuthorizeOptions = Parameters<typeof silentAuthorize>[0] & {
+      organizationId: string
+    }
+    const options: OrganizationAuthorizeOptions = {
+      ...BASE_OPTS,
+      timeoutMs: 500,
+      organizationId: ORGANIZATION_ID,
+    }
+    const p = silentAuthorize(options)
+    const iframe = await nextAppendedIframe()
+    const url = new URL(iframe.src)
+    postAuthResponse(iframe, AUTHORITY, {
+      code: "organization-code",
+      state: url.searchParams.get("state"),
+    })
+    await p
+
+    expect(url.searchParams.get("prompt")).toBe("none")
+    expect(url.searchParams.get("atol_org_id")).toBe(ORGANIZATION_ID)
+  })
+
   it("generates a distinct state + verifier on each call", async () => {
     const p1 = silentAuthorize({ ...BASE_OPTS, timeoutMs: 500 })
     const if1 = await nextAppendedIframe()
@@ -136,6 +162,42 @@ describe("silentAuthorize -- PKCE + authorize URL", () => {
 
     expect(s1).not.toBe(s2)
   })
+
+  it("[R28] isolates concurrent iframe responses by their source window", async () => {
+    const first = silentAuthorize({ ...BASE_OPTS, timeoutMs: 500 })
+    const firstIframe = await nextAppendedIframe()
+    const firstState = new URL(firstIframe.src).searchParams.get("state")
+    const firstOutcome = first.then(
+      (value) => ({ status: "fulfilled" as const, value }),
+      (error: unknown) => ({ status: "rejected" as const, error }),
+    )
+
+    const second = silentAuthorize({ ...BASE_OPTS, timeoutMs: 500 })
+    const secondIframe = await nextAppendedIframe()
+    const secondState = new URL(secondIframe.src).searchParams.get("state")
+
+    postAuthResponse(secondIframe, AUTHORITY, {
+      code: "second-code",
+      state: secondState,
+    })
+    await expect(second).resolves.toMatchObject({ code: "second-code" })
+
+    let firstSettled = false
+    void firstOutcome.then(() => {
+      firstSettled = true
+    })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(firstSettled).toBe(false)
+
+    postAuthResponse(firstIframe, AUTHORITY, {
+      code: "first-code",
+      state: firstState,
+    })
+    await expect(firstOutcome).resolves.toMatchObject({
+      status: "fulfilled",
+      value: { code: "first-code" },
+    })
+  })
 })
 
 describe("silentAuthorize -- error mapping + origin/state checks", () => {
@@ -145,22 +207,42 @@ describe("silentAuthorize -- error mapping + origin/state checks", () => {
 
   it("raises LoginRequiredError on login_required response", async () => {
     const p = silentAuthorize({ ...BASE_OPTS, timeoutMs: 500 })
-    postAuthResponse(await nextAppendedIframe(), AUTHORITY, {
+    const iframe = await nextAppendedIframe()
+    postAuthResponse(iframe, AUTHORITY, {
       error: "login_required",
       error_description: "session expired",
+      state: new URL(iframe.src).searchParams.get("state"),
     })
     await expect(p).rejects.toBeInstanceOf(LoginRequiredError)
   })
 
   it("raises LoginRequiredError on consent_required", async () => {
     const p = silentAuthorize({ ...BASE_OPTS, timeoutMs: 500 })
-    postAuthResponse(await nextAppendedIframe(), AUTHORITY, { error: "consent_required" })
+    const iframe = await nextAppendedIframe()
+    postAuthResponse(iframe, AUTHORITY, {
+      error: "consent_required",
+      state: new URL(iframe.src).searchParams.get("state"),
+    })
+    await expect(p).rejects.toBeInstanceOf(LoginRequiredError)
+  })
+
+  it("[R34] raises LoginRequiredError on account_selection_required", async () => {
+    const p = silentAuthorize({ ...BASE_OPTS, timeoutMs: 500 })
+    const iframe = await nextAppendedIframe()
+    postAuthResponse(iframe, AUTHORITY, {
+      error: "account_selection_required",
+      state: new URL(iframe.src).searchParams.get("state"),
+    })
     await expect(p).rejects.toBeInstanceOf(LoginRequiredError)
   })
 
   it("raises a non-login Error on server_error", async () => {
     const p = silentAuthorize({ ...BASE_OPTS, timeoutMs: 500 })
-    postAuthResponse(await nextAppendedIframe(), AUTHORITY, { error: "server_error" })
+    const iframe = await nextAppendedIframe()
+    postAuthResponse(iframe, AUTHORITY, {
+      error: "server_error",
+      state: new URL(iframe.src).searchParams.get("state"),
+    })
     await expect(p).rejects.toThrow(/server_error/)
     await expect(p).rejects.not.toBeInstanceOf(LoginRequiredError)
   })
@@ -193,69 +275,55 @@ describe("silentAuthorize -- error mapping + origin/state checks", () => {
 })
 
 describe("silentAuthorizeWithRetry", () => {
-  beforeEach(() => {
-    vi.useFakeTimers()
-  })
   afterEach(() => {
-    vi.useRealTimers()
     document.body.innerHTML = ""
   })
 
-  it("does not retry on LoginRequiredError", async () => {
-    const stub = vi.fn().mockImplementationOnce(() =>
-      Promise.reject(new LoginRequiredError()),
-    )
-    await expect(
-      silentAuthorizeWithRetryUsing(stub, BASE_OPTS, 3),
-    ).rejects.toBeInstanceOf(LoginRequiredError)
-    expect(stub).toHaveBeenCalledTimes(1)
+  it("does not retry a terminal authorize response", async () => {
+    const createElement = vi.spyOn(document, "createElement")
+    const p = silentAuthorizeWithRetry({ ...BASE_OPTS, timeoutMs: 50 }, 3)
+    const iframe = await nextAppendedIframe()
+    postAuthResponse(iframe, AUTHORITY, {
+      error: "login_required",
+      state: new URL(iframe.src).searchParams.get("state"),
+    })
+
+    await expect(p).rejects.toBeInstanceOf(LoginRequiredError)
+    expect(createElement.mock.calls.filter(([tag]) => tag === "iframe")).toHaveLength(1)
   })
 
-  it("retries transient failures up to N times then throws", async () => {
-    const stub = vi
-      .fn()
-      .mockRejectedValueOnce(new Error("network"))
-      .mockRejectedValueOnce(new Error("network"))
-      .mockRejectedValueOnce(new Error("network"))
-    const p = silentAuthorizeWithRetryUsing(stub, BASE_OPTS, 3)
-    const asserted = expect(p).rejects.toThrow(/network/)
-    await vi.runAllTimersAsync()
-    await asserted
-    expect(stub).toHaveBeenCalledTimes(3)
+  it("[R34] does not retry a state-integrity failure", async () => {
+    const createElement = vi.spyOn(document, "createElement")
+    const p = silentAuthorizeWithRetry({ ...BASE_OPTS, timeoutMs: 30 }, 3)
+    const iframe = await nextAppendedIframe()
+    postAuthResponse(iframe, AUTHORITY, {
+      code: "attacker-code",
+      state: "wrong-state",
+    })
+
+    const error = await p.catch((caught: unknown) => caught)
+    expect(error).toBeInstanceOf(Error)
+    expect((error as Error).message).toMatch(/state mismatch/)
+    expect(createElement.mock.calls.filter(([tag]) => tag === "iframe")).toHaveLength(1)
   })
 
-  it("succeeds if a later attempt resolves", async () => {
-    const stub = vi
-      .fn()
-      .mockRejectedValueOnce(new Error("network"))
-      .mockResolvedValueOnce({ code: "c", state: "s", codeVerifier: "v" })
-    const p = silentAuthorizeWithRetryUsing(stub, BASE_OPTS, 3)
-    await vi.runAllTimersAsync()
-    await expect(p).resolves.toEqual({ code: "c", state: "s", codeVerifier: "v" })
-    expect(stub).toHaveBeenCalledTimes(2)
+  it("retries a transient server response and returns the later grant", async () => {
+    const createElement = vi.spyOn(document, "createElement")
+    const p = silentAuthorizeWithRetry({ ...BASE_OPTS, timeoutMs: 500 }, 3)
+    const first = await nextAppendedIframe()
+    postAuthResponse(first, AUTHORITY, {
+      error: "server_error",
+      state: new URL(first.src).searchParams.get("state"),
+    })
+
+    await vi.waitFor(() => {
+      expect(document.querySelector("iframe")).not.toBeNull()
+    }, { timeout: 400 })
+    const second = document.querySelector("iframe") as HTMLIFrameElement
+    const secondState = new URL(second.src).searchParams.get("state")
+    postAuthResponse(second, AUTHORITY, { code: "recovered", state: secondState })
+
+    await expect(p).resolves.toMatchObject({ code: "recovered", state: secondState })
+    expect(createElement.mock.calls.filter(([tag]) => tag === "iframe")).toHaveLength(2)
   })
 })
-
-/**
- * Test-only helper: drives silentAuthorizeWithRetry's retry loop with a
- * stub, bypassing the iframe. The production path is unchanged.
- */
-async function silentAuthorizeWithRetryUsing(
-  stub: ReturnType<typeof vi.fn>,
-  opts: Parameters<typeof silentAuthorizeWithRetry>[0],
-  retries: number,
-): Promise<{ code: string; state: string; codeVerifier: string }> {
-  let lastErr: unknown
-  for (let attempt = 0; attempt < retries; attempt++) {
-    try {
-      return await stub(opts)
-    } catch (err) {
-      lastErr = err
-      if (err instanceof LoginRequiredError) throw err
-      if (attempt < retries - 1) {
-        await new Promise((r) => setTimeout(r, 200 * 2 ** attempt))
-      }
-    }
-  }
-  throw lastErr instanceof Error ? lastErr : new Error("silent renew failed after retries")
-}

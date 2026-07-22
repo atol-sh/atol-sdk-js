@@ -25,6 +25,7 @@ function mockFetchOnce(response: { ok: boolean; status?: number; body: unknown }
   const stub = vi.fn().mockResolvedValueOnce({
     ok: response.ok,
     status: response.status ?? (response.ok ? 200 : 400),
+    headers: new Headers(),
     json: async () => response.body,
     text: async () =>
       typeof response.body === "string" ? response.body : JSON.stringify(response.body),
@@ -124,6 +125,35 @@ describe("exchangeCode", () => {
       exchangeCode(AUTHORITY, CLIENT_ID, "c", "https://app/cb", "v", { signProof }),
     ).rejects.toBeDefined()
     expect(stub).toHaveBeenCalledTimes(1)
+  })
+
+  it('[R30] reuses the latest successful server nonce on the next token request', async () => {
+    const signer = { signProof: vi.fn().mockResolvedValue('proof') }
+    const stub = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        headers: new Headers({ 'DPoP-Nonce': 'nonce-for-next-request' }),
+        json: async () => ({ access_token: 'at-1', token_type: 'DPoP', expires_in: 60 }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        headers: new Headers(),
+        json: async () => ({ access_token: 'at-2', token_type: 'DPoP', expires_in: 60 }),
+      })
+    vi.stubGlobal('fetch', stub)
+
+    await exchangeCode(AUTHORITY, CLIENT_ID, 'code-1', 'https://app/cb', 'verifier-1', signer)
+    await exchangeCode(AUTHORITY, CLIENT_ID, 'code-2', 'https://app/cb', 'verifier-2', signer)
+
+    expect(signer.signProof).toHaveBeenNthCalledWith(
+      2,
+      'POST',
+      `${AUTHORITY}/auth/token`,
+      { nonce: 'nonce-for-next-request' },
+    )
   })
 })
 

@@ -154,6 +154,8 @@ describe("createDPoPKeyManager -- key material", () => {
     // Thumbprint of the exposed JWK and of the header JWK must match --
     // this is exactly the cnf.jkt binding the server relies on.
     expect(await rfc7638Thumbprint(headerJwk)).toBe(await rfc7638Thumbprint(jwk))
+    expect(await mgr!.thumbprint()).toBe(await rfc7638Thumbprint(jwk))
+    expect(await mgr!.thumbprint()).toBe(await mgr!.thumbprint())
   })
 })
 

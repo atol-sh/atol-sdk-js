@@ -6,7 +6,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-No unreleased changes yet.
+## [0.2.0] - 2026-07-21
+
+### Added
+
+- `selectOrganization(organizationId)` starts a distinct `prompt=none`
+  organization grant and exposes the committed credential context as
+  `AtolSession.organizationId`.
+- `DPoPKeyManager.thumbprint()` exposes the RFC 7638 thumbprint used to
+  validate access-token `cnf.jkt` binding.
+
+### Changed
+
+- Interactive callbacks now consume oidc-client-ts state/PKCE through its
+  public APIs, use the SDK's DPoP-aware code exchange, and verify ID-token
+  signature, issuer, audience, required claims, and callback nonce.
+- Token responses commit atomically only after access/ID subjects and
+  organization claims agree. Organization selection is isolated from older
+  generic renewal results.
+- Cross-tab coordination is signal-only. Tokens never travel through
+  `BroadcastChannel`; each tab renews with its own DPoP key and grant.
+- `AtolUser` no longer exposes organization, plan, or role claims. Selected
+  organization is credential context, not user identity.
+
+### Security
+
+- DPoP responses now require `token_type=DPoP` and an access-token `cnf.jkt`
+  matching the active tab key. `{ dpop: { required: true } }` fails init when
+  WebCrypto cannot create that key.
+- Access tokens are verified as signed `at+jwt` credentials for the configured
+  resource before their subject, organization, or DPoP binding is trusted.
+- Interactive callback state without a nonce is rejected. Callback completion
+  is single-flight, owns bounded failure cleanup, and cannot commit after the
+  client is destroyed.
+- Only typed transport failures are retried; configuration, URL, and WebCrypto
+  `TypeError` failures surface immediately.
+- Package type checking now includes all tests and protocol mocks.
 
 ## [0.1.2] - 2026-07-08
 
@@ -72,5 +107,8 @@ Initial release. Framework-agnostic browser security core extracted from
 - Tokens are memory-only: access/ID/refresh tokens never touch Web Storage;
   `sessionStorage` holds only the OIDC state/PKCE verifier.
 
-[Unreleased]: https://github.com/atol-sh/atol-sdk-js/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/atol-sh/atol-sdk-js/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/atol-sh/atol-sdk-js/compare/v0.1.2...v0.2.0
+[0.1.2]: https://github.com/atol-sh/atol-sdk-js/compare/v0.1.1...v0.1.2
+[0.1.1]: https://github.com/atol-sh/atol-sdk-js/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/atol-sh/atol-sdk-js/releases/tag/v0.1.0

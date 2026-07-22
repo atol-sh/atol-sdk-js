@@ -35,9 +35,9 @@ describe('parseAtolUser', () => {
     expect(user.email).toBe('remi@example.com')
     expect(user.emailVerified).toBe(true)
     expect(user.name).toBe('Remi')
-    expect(user.orgId).toBe('org_01ABC')
-    expect(user.plan).toBe('pro')
-    expect(user.roles).toEqual(['admin', 'editor'])
+    expect(user).not.toHaveProperty('orgId')
+    expect(user).not.toHaveProperty('plan')
+    expect(user).not.toHaveProperty('roles')
     expect(user.authMethod).toBe('oidc')
     expect(user.mfaVerified).toBe(true)
   })
@@ -50,16 +50,16 @@ describe('parseAtolUser', () => {
     expect(user.email).toBe('')
     expect(user.emailVerified).toBe(false)
     expect(user.name).toBe('')
-    expect(user.orgId).toBe('')
-    expect(user.plan).toBe('')
-    expect(user.roles).toEqual([])
+    expect(user).not.toHaveProperty('orgId')
+    expect(user).not.toHaveProperty('plan')
+    expect(user).not.toHaveProperty('roles')
     expect(user.authMethod).toBe('')
     expect(user.mfaVerified).toBe(false)
   })
 
-  it('handles non-array roles', () => {
+  it('does not expose role claims as user identity', () => {
     const token = makeJWT({ sub: 'usr_123', 'atol:roles': 'not-an-array' })
-    expect(parseAtolUser(token).roles).toEqual([])
+    expect(parseAtolUser(token)).not.toHaveProperty('roles')
   })
 
   it('coerces a non-string sub to the empty id (rejected as user)', () => {

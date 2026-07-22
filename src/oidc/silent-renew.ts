@@ -14,6 +14,8 @@ import {
   LoginRequiredError,
   NetworkError,
   OAuthProtocolError,
+  RecoveryAction,
+  classifyRenewalError,
 } from './token-recovery'
 
 // Re-export for backward compatibility -- the browser auth client and the
@@ -30,12 +32,14 @@ interface AuthorizationResponse {
   }
 }
 
-interface SilentRenewOptions {
+export interface SilentRenewOptions {
   authority: string
   clientId: string
   redirectUri: string
   scope: string
   audience?: string
+  /** Canonical organization selected for this authorization grant. */
+  organizationId?: string
   /**
    * When true, asks the server to include `atol:wrapped_dek` on the renewed
    * ID token. The KEK is NOT re-delivered (the password isn't available
@@ -60,6 +64,17 @@ export const DEFAULT_AUTHORIZE_TIMEOUT_MS = 60_000
 /** Default retry count for silent authorize on transient errors. */
 export const DEFAULT_SILENT_RENEW_RETRY_COUNT = 3
 
+export interface SilentAuthorizationResult {
+  code: string
+  state: string
+  codeVerifier: string
+  nonce: string
+}
+
+/** Generate one cryptographically random nonce for an OIDC authorization. */
+export function generateAuthorizationNonce(): string {
+  return generateRandomString(32)
+}
 
 /**
  * Perform a silent authorization request via web_message.
@@ -67,7 +82,7 @@ export const DEFAULT_SILENT_RENEW_RETRY_COUNT = 3
  */
 export async function silentAuthorize(
   opts: SilentRenewOptions,
-): Promise<{ code: string; state: string; codeVerifier: string }> {
+): Promise<SilentAuthorizationResult> {
   const timeout = opts.timeoutMs ?? DEFAULT_AUTHORIZE_TIMEOUT_MS
 
   // Generate PKCE challenge.
@@ -76,6 +91,8 @@ export async function silentAuthorize(
 
   // Generate state for CSRF.
   const state = generateRandomString(32)
+  // Bind the returned ID token to this exact authorization transaction.
+  const nonce = generateAuthorizationNonce()
 
   // Build the authorize URL with response_mode=web_message.
   const params = new URLSearchParams({
@@ -85,12 +102,16 @@ export async function silentAuthorize(
     response_mode: 'web_message',
     scope: opts.scope,
     state,
+    nonce,
     prompt: 'none',
     code_challenge: challenge,
     code_challenge_method: 'S256',
   })
   if (opts.audience) {
     params.set('audience', opts.audience)
+  }
+  if (opts.organizationId) {
+    params.set('atol_org_id', opts.organizationId)
   }
   if (opts.deriveEncryptionKey) {
     // The server re-emits the stored wrapped DEK on silent renew when this
@@ -102,7 +123,7 @@ export async function silentAuthorize(
   const authorizeUrl = `${opts.authority}/auth/authorize?${params.toString()}`
   const expectedOrigin = new URL(opts.authority).origin
 
-  return new Promise<{ code: string; state: string; codeVerifier: string }>((resolve, reject) => {
+  return new Promise<SilentAuthorizationResult>((resolve, reject) => {
     let iframe: HTMLIFrameElement | null = null
     let timer: ReturnType<typeof setTimeout> | null = null
 
@@ -117,13 +138,27 @@ export async function silentAuthorize(
     function onMessage(event: MessageEvent) {
       // Verify origin matches the authorization server.
       if (event.origin !== expectedOrigin) return
+      // Concurrent organization and renewal grants share the same IdP
+      // origin. A response belongs only to the iframe that initiated this
+      // transaction, so origin alone is not a sufficient correlation key.
+      if (!iframe || event.source !== iframe.contentWindow) return
 
       const data = event.data as AuthorizationResponse
       if (!data || data.type !== 'authorization_response') return
 
-      cleanup()
-
       const resp = data.response
+      if (!resp.state) {
+        cleanup()
+        reject(new Error('missing state in authorization response'))
+        return
+      }
+      if (resp.state !== state) {
+        cleanup()
+        reject(new Error('state mismatch'))
+        return
+      }
+
+      cleanup()
       if (resp.error) {
         // Map the authorize-endpoint error code to a typed exception so
         // the recovery layer can classify it. login_required /
@@ -134,7 +169,8 @@ export async function silentAuthorize(
         if (
           code === "login_required" ||
           code === "consent_required" ||
-          code === "interaction_required"
+          code === "interaction_required" ||
+          code === "account_selection_required"
         ) {
           reject(new LoginRequiredError(resp.error_description || code))
         } else {
@@ -143,17 +179,12 @@ export async function silentAuthorize(
         return
       }
 
-      if (!resp.code || !resp.state) {
-        reject(new Error('missing code or state in authorization response'))
+      if (!resp.code) {
+        reject(new Error('missing code in authorization response'))
         return
       }
 
-      if (resp.state !== state) {
-        reject(new Error('state mismatch'))
-        return
-      }
-
-      resolve({ code: resp.code, state: resp.state, codeVerifier: verifier })
+      resolve({ code: resp.code, state: resp.state, codeVerifier: verifier, nonce })
     }
 
     window.addEventListener('message', onMessage)
@@ -161,7 +192,7 @@ export async function silentAuthorize(
     // Timeout.
     timer = setTimeout(() => {
       cleanup()
-      reject(new Error('silent renew timed out'))
+      reject(new NetworkError('silent renew timed out'))
     }, timeout)
 
     // Create hidden iframe.
@@ -181,14 +212,14 @@ export async function silentAuthorize(
 export async function silentAuthorizeWithRetry(
   opts: SilentRenewOptions,
   retries: number = DEFAULT_SILENT_RENEW_RETRY_COUNT,
-): Promise<{ code: string; state: string; codeVerifier: string }> {
+): Promise<SilentAuthorizationResult> {
   let lastErr: unknown
   for (let attempt = 0; attempt < retries; attempt++) {
     try {
       return await silentAuthorize(opts)
     } catch (err) {
       lastErr = err
-      if (err instanceof LoginRequiredError) throw err
+      if (classifyRenewalError(err) !== RecoveryAction.Retry) throw err
       // Exponential-ish backoff: 200ms, 400ms, 800ms. Cheap to wait; prevents
       // hammering the authorize endpoint when the network is flapping.
       if (attempt < retries - 1) {
@@ -221,6 +252,26 @@ export interface DPoPSigner {
   signProof(method: string, url: string, options?: DPoPProofOptions): Promise<string>
 }
 
+// Server nonces are scoped to one proof key and token endpoint. Weak keys
+// keep the state tab-local and let it disappear with the signer without
+// persisting either proof state or credential material.
+const dpopServerNonces = new WeakMap<DPoPSigner, Map<string, string>>()
+
+function rememberedDPoPNonce(dpop: DPoPSigner, url: string): string | undefined {
+  return dpopServerNonces.get(dpop)?.get(url)
+}
+
+function rememberDPoPNonce(dpop: DPoPSigner, url: string, response: Response): void {
+  const nonce = response.headers.get('DPoP-Nonce')
+  if (!nonce) return
+  let byURL = dpopServerNonces.get(dpop)
+  if (!byURL) {
+    byURL = new Map()
+    dpopServerNonces.set(dpop, byURL)
+  }
+  byURL.set(url, nonce)
+}
+
 /**
  * POST to the token endpoint with an optional DPoP proof, transparently
  * handling the RFC 9449 §8 server-nonce challenge: if the server replies
@@ -238,10 +289,17 @@ async function tokenEndpointPost(
       'Content-Type': 'application/x-www-form-urlencoded',
     }
     if (dpop) {
-      headers['DPoP'] = await dpop.signProof('POST', url, nonce ? { nonce } : undefined)
+      const effectiveNonce = nonce ?? rememberedDPoPNonce(dpop, url)
+      headers['DPoP'] = await dpop.signProof(
+        'POST',
+        url,
+        effectiveNonce ? { nonce: effectiveNonce } : undefined,
+      )
     }
     try {
-      return await fetch(url, { method: 'POST', headers, body })
+      const response = await fetch(url, { method: 'POST', headers, body })
+      if (dpop) rememberDPoPNonce(dpop, url, response)
+      return response
     } catch (err) {
       throw new NetworkError(`${op} network error`, err)
     }

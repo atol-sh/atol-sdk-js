@@ -40,8 +40,8 @@ const auth = createAtolBrowserAuth({
   storage: 'memory',                   // tokens are always memory-only
 })
 
-const unsubscribe = auth.onSessionChange(({ isAuthenticated, user }) => {
-  render(isAuthenticated, user)
+const unsubscribe = auth.onSessionChange(({ isAuthenticated, user, organizationId }) => {
+  render(isAuthenticated, user, organizationId)
 })
 
 // On startup: handles a redirect callback, or silently restores a session
@@ -54,6 +54,10 @@ await auth.beginLogin()
 // On the redirect URI page: exchange the code for tokens. init() calls
 // this automatically, so most apps never call it directly.
 await auth.completeLogin()
+
+// Switch the credential context after the user chooses an organization.
+// This mints a new access/ID-token pair; it is not a generic token refresh.
+await auth.selectOrganization('01KV4BNVVNZ4TNY0PP0CVXPZWP')
 
 // Get a token for an API call (DPoP-aware: pass the request you're about
 // to make so the proof's `htm`/`htu` bind to it):
@@ -73,7 +77,9 @@ await auth.logout()
 Other methods on the returned client: `forceRenew()` bypasses the
 freshness check and renews immediately; `stepUp()` forces re-authentication
 (`prompt=login`, `max_age=0`, `acr_values=mfa` by default) for a sensitive
-operation that requires a fresh auth; `signDPoPProof(method, url)` signs a
+operation that requires a fresh auth; `selectOrganization(id)` starts a
+distinct silent organization grant and exposes the selected ID on
+`AtolSession.organizationId`; `signDPoPProof(method, url)` signs a
 standalone RFC 9449 proof for a request to your own protected resource;
 `isDPoPActive()` reports whether DPoP is actually in effect (it can be
 `false` even when `dpop: true` was requested, if WebCrypto is unavailable);
@@ -86,8 +92,8 @@ own flows:
 
 - **DPoP** - `createDPoPKeyManager` (per-tab non-exportable ES256 key,
   RFC 9449 proofs).
-- **Verification** - `verifyIdToken` (JWKS signature + issuer + audience,
-  the trust gate for cross-tab token adoption).
+- **Verification** - `verifyIdToken` (JWKS signature + issuer + audience +
+  required OIDC claims and callback nonce).
 - **OIDC / PKCE** - `createUserManager`, `silentAuthorize`,
   `silentAuthorizeWithRetry`, `exchangeCode`, `refreshTokenGrant`,
   `revokeToken`.
@@ -129,14 +135,19 @@ This is a security library first. Key properties:
   attached to every token-endpoint call and to `getAccessToken({ dpop })`
   results. A stolen access token cannot be replayed from another client
   without the private key, which never leaves the browser's WebCrypto
-  keystore.
+  keystore. Every token response is rejected unless `token_type=DPoP` and
+  the access token's `cnf.jkt` matches that tab key. Use
+  `dpop: { required: true }` to fail initialization when key creation is
+  unavailable instead of permitting the boolean option's Bearer fallback.
 - **PKCE + nonce + ID token verification.** Login uses OIDC Authorization
   Code with PKCE (no implicit flow, no client secret in the browser).
-  Cross-tab token adoption over `BroadcastChannel` is untrusted by default:
-  a rotated token is only adopted after its ID token is verified against
-  the issuer's JWKS (signature, issuer, audience) and the subject is
-  pinned to the current session, so a same-origin script cannot forge a
-  session takeover.
+  Callback state and PKCE are consumed through oidc-client-ts, while the SDK
+  performs the DPoP-aware code exchange and verifies the ID token against
+  the issuer's JWKS, including the stored nonce when present.
+- **Signal-only cross-tab coordination.** `BroadcastChannel` messages carry
+  only credential-invalidation and session-ended signals. Access, ID, and
+  refresh tokens never cross tabs; each receiving tab renews with its own
+  DPoP key and grant.
 - **RP-initiated logout + refresh-token revocation.** `logout()`
   best-effort revokes the refresh token (RFC 7009) when one exists (the
   refresh opt-in) before redirecting to the issuer's `end_session` endpoint

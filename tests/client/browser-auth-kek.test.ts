@@ -58,6 +58,7 @@ type ManagerSpies = {
 }
 
 let manager: ManagerSpies
+let callbackTokens: Record<string, unknown> | null = null
 
 function freshManager(): ManagerSpies {
   return {
@@ -75,6 +76,15 @@ vi.mock('../../src/oidc/oidc', async (importOriginal) => {
   return {
     ...actual,
     createUserManager: () => manager as unknown as object,
+    readAuthorizationCodeCallback: vi.fn(async () => {
+      callbackTokens = await manager.signinRedirectCallback()
+      return {
+        code: 'authcode',
+        codeVerifier: 'verifier',
+        redirectUri: REDIRECT,
+        nonce: 'callback-nonce',
+      }
+    }),
     getAccessToken: (u: { access_token?: string } | null) => u?.access_token,
     getIdToken: (u: { id_token?: string } | null) => u?.id_token,
     userFromTokenResponse: (tokens: {
@@ -100,6 +110,18 @@ vi.mock('../../src/oidc/silent-renew', async (importOriginal) => {
     revokeToken: vi.fn().mockResolvedValue(undefined),
   }
 })
+
+vi.mock('../../src/verify/verify', () => ({
+  verifyAccessToken: vi.fn(async (token: string) =>
+    JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString()),
+  ),
+  verifyIdToken: vi.fn(async (token: string, options: { nonce?: string }) => {
+    const claims = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString())
+    if (options.nonce !== undefined) claims.nonce = options.nonce
+    return claims
+  }),
+  _resetDiscoveryCache: vi.fn(),
+}))
 
 import { createAtolBrowserAuth } from '../../src/client/browser-auth'
 import {
@@ -189,6 +211,19 @@ function resetVaultDB(): Promise<void> {
 
 beforeEach(async () => {
   manager = freshManager()
+  callbackTokens = null
+  mockExchange.mockImplementation(async () => {
+    if (!callbackTokens) throw new Error('no callback token response configured')
+    const source = callbackTokens
+    callbackTokens = null
+    return {
+      access_token: source.access_token as string,
+      id_token: source.id_token as string | undefined,
+      refresh_token: source.refresh_token as string | undefined,
+      token_type: (source.token_type as string | undefined) ?? 'bearer',
+      expires_in: 3600,
+    }
+  })
   sessionStorage.clear()
   globalThis.localStorage?.clear()
   window.history.replaceState({}, '', '/')
@@ -390,7 +425,7 @@ describe('createAtolBrowserAuth -- rehydrate across a silent renew keeps the key
     // key (deriveEncKey is a no-op when a key is present) and, on a fresh
     // client with cleared state, rehydrates from the vault.
     window.history.replaceState({}, '', '/') // no callback, no fragment
-    mockAuthorize.mockResolvedValue({ code: 'silent', state: 's', codeVerifier: 'v' })
+    mockAuthorize.mockResolvedValue({ code: 'silent', state: 's', codeVerifier: 'v', nonce: 'nonce-v' })
     mockExchange.mockResolvedValue({
       access_token: makeAccessToken(3600),
       id_token: idTokenWith(wrapped),
@@ -430,7 +465,7 @@ describe('createAtolBrowserAuth -- rehydrate across a silent renew keeps the key
     manager = freshManager()
     window.history.replaceState({}, '', '/')
     window.location.hash = ''
-    mockAuthorize.mockResolvedValue({ code: 'silent', state: 's', codeVerifier: 'v' })
+    mockAuthorize.mockResolvedValue({ code: 'silent', state: 's', codeVerifier: 'v', nonce: 'nonce-v' })
     mockExchange.mockResolvedValue({
       access_token: makeAccessToken(3600),
       id_token: idTokenWith(wrapped),

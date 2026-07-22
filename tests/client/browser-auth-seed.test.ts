@@ -149,7 +149,7 @@ describe('seedTestSession when enabled', () => {
     const session = await auth.seedTestSession(seedTokens())
     expect(session.isAuthenticated).toBe(true)
     expect(session.user?.id).toBe('user-1')
-    expect(session.user?.orgId).toBe('org-1')
+    expect(session.user).not.toHaveProperty('orgId')
     auth.destroy()
   })
 
@@ -204,9 +204,16 @@ describe('seedTestSession when enabled', () => {
     auth.destroy()
   })
 
-  it('stays unauthenticated when the token response carries no id token', async () => {
+  it('fails loud and stays unauthenticated when the response has no ID token', async () => {
     const auth = enabledClient()
-    const session = await auth.seedTestSession(seedTokens({ id_token: undefined }))
+    await expect(
+      auth.seedTestSession(seedTokens({ id_token: undefined })),
+    ).rejects.toThrow(/missing an ID token/)
+    let session!: AtolSession
+    const unsubscribe = auth.onSessionChange((value) => {
+      session = value
+    })
+    unsubscribe()
     expect(session.isAuthenticated).toBe(false)
     expect(session.user).toBeNull()
     auth.destroy()

@@ -1,17 +1,10 @@
 /**
- * Cross-tab token rotation broadcast.
+ * Cross-tab credential lifecycle signals.
  *
- * When the leader tab rotates tokens, it publishes the new access/id/refresh
- * tokens to a shared `BroadcastChannel`. Follower tabs subscribe to the
- * channel and apply the rotated tokens without running their own renewal,
- * so concurrent open tabs collapse to a single /auth/token POST per cycle.
- *
- * Refresh tokens are deliberately broadcast because the server rotates them
- * on every use (RFC 6749 §10.4). A follower whose refresh token is stale
- * will hit `invalid_grant` on its next renew -- which, under the server's
- * refresh-token reuse detection, invalidates the whole family and signs every
- * tab out. Sharing
- * the rotated value prevents that chain reaction.
+ * Proof-bound tokens are tab-local because every tab owns a different DPoP
+ * key. The channel therefore carries signals only. A receiving tab renews
+ * with its own key and grant; it never adopts credential material minted for
+ * another tab.
  *
  * The channel stays same-origin by construction. If `BroadcastChannel` is
  * unavailable (old Safari, some sandboxed iframes), the helper degrades to
@@ -19,26 +12,18 @@
  * regression to per-tab behavior, not a failure.
  */
 
-export interface TokenRotatedMessage {
-  type: "token-rotated"
-  /** Access token sent as the Authorization header; always present. */
-  accessToken: string
-  /** ID token if one was issued on this grant. */
-  idToken?: string
-  /** Rotated refresh token if the server returned one. */
-  refreshToken?: string
-  /** ms-since-epoch at which the access token expires; followers compute their own timers off this. */
-  expiresAt: number
-  /** ms-since-epoch when the message was sent. Lets followers discard stale broadcasts. */
+export interface CredentialsInvalidatedMessage {
+  type: "credentials-invalidated"
+  /** ms-since-epoch when the message was sent. */
   sentAt: number
 }
 
-export interface SessionExpiredMessage {
-  type: "session-expired"
+export interface SessionEndedMessage {
+  type: "session-ended"
   sentAt: number
 }
 
-export type BroadcastMessage = TokenRotatedMessage | SessionExpiredMessage
+export type BroadcastMessage = CredentialsInvalidatedMessage | SessionEndedMessage
 
 export interface TokenBroadcast {
   publish(message: BroadcastMessage): void
@@ -66,8 +51,12 @@ function getBroadcastChannelCtor(): (new (name: string) => BroadcastChannelShape
 
 function isBroadcastMessage(value: unknown): value is BroadcastMessage {
   if (!value || typeof value !== "object") return false
-  const t = (value as { type?: unknown }).type
-  return t === "token-rotated" || t === "session-expired"
+  const message = value as { type?: unknown; sentAt?: unknown }
+  return (
+    (message.type === "credentials-invalidated" || message.type === "session-ended") &&
+    typeof message.sentAt === "number" &&
+    Number.isFinite(message.sentAt)
+  )
 }
 
 /**

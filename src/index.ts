@@ -43,15 +43,17 @@ export { createDPoPKeyManager } from './dpop/dpop'
 export type { DPoPKeyManager, DPoPProofOptions } from './dpop/dpop'
 
 // --- ID token verification (JWKS) ---
-export { verifyIdToken, _resetDiscoveryCache } from './verify/verify'
+export { verifyAccessToken, verifyIdToken, _resetDiscoveryCache } from './verify/verify'
 
 // --- OIDC / PKCE / token endpoint ---
 export {
   createUserManager,
   getAccessToken,
   getIdToken,
+  readAuthorizationCodeCallback,
   userFromTokenResponse,
 } from './oidc/oidc'
+export type { AuthorizationCodeCallback } from './oidc/oidc'
 export {
   silentAuthorize,
   silentAuthorizeWithRetry,
@@ -62,7 +64,7 @@ export {
   DEFAULT_AUTHORIZE_TIMEOUT_MS,
   DEFAULT_SILENT_RENEW_RETRY_COUNT,
 } from './oidc/silent-renew'
-export type { TokenResponse, DPoPSigner } from './oidc/silent-renew'
+export type { TokenResponse, DPoPSigner, SilentRenewOptions } from './oidc/silent-renew'
 export {
   OAuthProtocolError,
   NetworkError,
@@ -80,8 +82,8 @@ export {
 export type {
   TokenBroadcast,
   BroadcastMessage,
-  TokenRotatedMessage,
-  SessionExpiredMessage,
+  CredentialsInvalidatedMessage,
+  SessionEndedMessage,
 } from './token/token-broadcast'
 
 // --- Permissions ---

@@ -49,11 +49,6 @@ describe("classifyRenewalError -- transient errors", () => {
     )
   })
 
-  it("bare TypeError (fetch rejection) -> Retry", () => {
-    expect(classifyRenewalError(new TypeError("Failed to fetch"))).toBe(
-      RecoveryAction.Retry,
-    )
-  })
 })
 
 describe("classifyRenewalError -- surface", () => {
@@ -75,6 +70,13 @@ describe("classifyRenewalError -- surface", () => {
 
   it("plain Error -> Surface (not auto-retryable)", () => {
     expect(classifyRenewalError(new Error("something"))).toBe(
+      RecoveryAction.Surface,
+    )
+  })
+
+  it('[R48] TypeError -> Surface because transport failures must be normalized', () => {
+    expect(classifyRenewalError(new TypeError('Invalid URL'))).toBe(RecoveryAction.Surface)
+    expect(classifyRenewalError(new TypeError('WebCrypto is unavailable'))).toBe(
       RecoveryAction.Surface,
     )
   })

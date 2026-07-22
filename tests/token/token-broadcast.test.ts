@@ -9,9 +9,8 @@ import {
  * jsdom v16+ ships BroadcastChannel, so these tests use the real thing
  * wherever possible. The "no-op" test uninstalls it to exercise the
  * fallback path. The type-guard tests assert that only well-formed
- * token-rotated / session-expired messages ever reach a subscriber -- the
- * first line of defense against a forged same-origin broadcast (the
- * signature check lives in the browser auth client, tested separately).
+ * credential-invalidated / session-ended signals ever reach a subscriber.
+ * Credential material is deliberately not part of either message shape.
  */
 
 describe("createTokenBroadcast", () => {
@@ -30,20 +29,15 @@ describe("createTokenBroadcast", () => {
     const unsubscribe = sub.subscribe((m) => received.push(m))
 
     pub.publish({
-      type: "token-rotated",
-      accessToken: "at",
-      idToken: "id",
-      refreshToken: "rt",
-      expiresAt: 123_456,
+      type: "credentials-invalidated",
       sentAt: 123_000,
     })
     await new Promise((r) => setTimeout(r, 20))
 
     expect(received).toHaveLength(1)
     expect(received[0]).toMatchObject({
-      type: "token-rotated",
-      accessToken: "at",
-      refreshToken: "rt",
+      type: "credentials-invalidated",
+      sentAt: 123_000,
     })
 
     unsubscribe()
@@ -57,7 +51,7 @@ describe("createTokenBroadcast", () => {
     const received: BroadcastMessage[] = []
     const unsubscribe = b.subscribe((m) => received.push(m))
 
-    a.publish({ type: "token-rotated", accessToken: "x", expiresAt: 1, sentAt: 0 })
+    a.publish({ type: "credentials-invalidated", sentAt: 0 })
     await new Promise((r) => setTimeout(r, 20))
 
     expect(received).toHaveLength(0)
@@ -66,17 +60,17 @@ describe("createTokenBroadcast", () => {
     b.close()
   })
 
-  it("delivers session-expired broadcasts", async () => {
+  it("delivers session-ended broadcasts", async () => {
     const pub = createTokenBroadcast("atol:test:logout")
     const sub = createTokenBroadcast("atol:test:logout")
     const received: BroadcastMessage[] = []
     const unsubscribe = sub.subscribe((m) => received.push(m))
 
-    pub.publish({ type: "session-expired", sentAt: Date.now() })
+    pub.publish({ type: "session-ended", sentAt: Date.now() })
     await new Promise((r) => setTimeout(r, 20))
 
     expect(received).toHaveLength(1)
-    expect(received[0].type).toBe("session-expired")
+    expect(received[0].type).toBe("session-ended")
     unsubscribe()
     pub.close()
     sub.close()
@@ -110,7 +104,7 @@ describe("createTokenBroadcast", () => {
     })
     const unsubGood = sub.subscribe(good)
 
-    pub.publish({ type: "session-expired", sentAt: Date.now() })
+    pub.publish({ type: "session-ended", sentAt: Date.now() })
     await new Promise((r) => setTimeout(r, 20))
 
     // A throwing subscriber must not prevent the other from receiving.
@@ -128,7 +122,7 @@ describe("createTokenBroadcast", () => {
     const unsubscribe = sub.subscribe(handler)
     unsubscribe()
 
-    pub.publish({ type: "session-expired", sentAt: Date.now() })
+    pub.publish({ type: "session-ended", sentAt: Date.now() })
     await new Promise((r) => setTimeout(r, 20))
 
     expect(handler).not.toHaveBeenCalled()
@@ -148,7 +142,7 @@ describe("createTokenBroadcast", () => {
       const bc = createTokenBroadcast("atol:test:noop")
       const handler = vi.fn()
       const unsubscribe = bc.subscribe(handler)
-      bc.publish({ type: "session-expired", sentAt: 0 })
+      bc.publish({ type: "session-ended", sentAt: 0 })
       await new Promise((r) => setTimeout(r, 5))
       expect(handler).not.toHaveBeenCalled()
       unsubscribe()

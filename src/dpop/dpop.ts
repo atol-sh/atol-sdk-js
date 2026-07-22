@@ -19,6 +19,7 @@
  */
 
 import { bytesToBase64Url, stringToBase64Url } from "../crypto/base64url"
+import { calculateJwkThumbprint, type JWK } from "jose"
 
 /** Optional per-proof inputs (RFC 9449 resource access + server nonce). */
 export interface DPoPProofOptions {
@@ -42,11 +43,14 @@ export interface DPoPKeyManager {
   signProof(method: string, url: string, options?: DPoPProofOptions): Promise<string>
   /** Public JWK -- used by the server to compute `cnf.jkt`. */
   publicJWK(): Promise<JsonWebKey>
+  /** RFC 7638 SHA-256 thumbprint expected in a bound token's `cnf.jkt`. */
+  thumbprint(): Promise<string>
 }
 
 /**
  * Create a per-tab DPoP key manager. Returns null when WebCrypto is not
- * available -- the caller should fall back to Bearer mode silently.
+ * available. The caller decides whether that means Bearer fallback or a
+ * fatal error according to its public configuration.
  */
 export async function createDPoPKeyManager(): Promise<DPoPKeyManager | null> {
   if (typeof crypto === "undefined" || typeof crypto.subtle === "undefined") {
@@ -67,6 +71,7 @@ export async function createDPoPKeyManager(): Promise<DPoPKeyManager | null> {
   // header's `jwk` field must be byte-for-byte stable for the server's
   // thumbprint to match across calls.
   let cachedJWK: JsonWebKey | null = null
+  let cachedThumbprint: string | null = null
   async function pubJWK(): Promise<JsonWebKey> {
     if (cachedJWK) return cachedJWK
     // For the proof header we need an extractable PUBLIC key -- the
@@ -85,6 +90,12 @@ export async function createDPoPKeyManager(): Promise<DPoPKeyManager | null> {
   return {
     async publicJWK() {
       return pubJWK()
+    },
+    async thumbprint() {
+      if (!cachedThumbprint) {
+        cachedThumbprint = await calculateJwkThumbprint(await pubJWK() as JWK, "sha256")
+      }
+      return cachedThumbprint
     },
     async signProof(method: string, url: string, options?: DPoPProofOptions): Promise<string> {
       const jwk = await pubJWK()

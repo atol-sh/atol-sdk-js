@@ -124,10 +124,6 @@ export function classifyRenewalError(err: unknown): RecoveryAction {
 
   if (err instanceof NetworkError) return RecoveryAction.Retry
 
-  // Fetch failures surface as TypeError on most runtimes
-  // ("Failed to fetch" / "NetworkError when attempting to fetch resource").
-  if (err instanceof TypeError) return RecoveryAction.Retry
-
   return RecoveryAction.Surface
 }
 

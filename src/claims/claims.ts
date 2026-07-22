@@ -18,9 +18,6 @@ export function parseAtolUser(token: string): AtolUser {
     email: str('email'),
     emailVerified: payload['email_verified'] === true,
     name: str('name'),
-    orgId: str('atol:org_id'),
-    plan: str('atol:plan'),
-    roles: Array.isArray(payload['atol:roles']) ? payload['atol:roles'] as string[] : [],
     authMethod: str('atol:auth_method'),
     mfaVerified: payload['atol:mfa_verified'] === true,
   }
