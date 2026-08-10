@@ -50,6 +50,37 @@ describe('createAtolBrowserAuth -- forceRenew', () => {
     expect(lastStore.refresh_token).toBe('rt_two')
     client.destroy()
   })
+
+  it('preserves unrotated refresh and ID tokens across renewals', async () => {
+    const originalIdToken = makeIDToken()
+    window.history.replaceState({}, '', '/cb?code=authcode&state=xyz')
+    manager.signinRedirectCallback.mockResolvedValue({
+      access_token: makeAccessToken(),
+      id_token: originalIdToken,
+      refresh_token: 'rt_one',
+    })
+    const client = makeClient(false, true)
+    await client.init()
+
+    mockRefresh
+      .mockResolvedValueOnce(tokenResponse({
+        id_token: undefined,
+        refresh_token: undefined,
+      }))
+      .mockResolvedValueOnce(tokenResponse({ refresh_token: 'rt_two' }))
+
+    await client.forceRenew()
+    const firstRenewal = manager.storeUser.mock.calls.at(-1)![0] as {
+      id_token?: string
+      refresh_token?: string
+    }
+    expect(firstRenewal.id_token).toBe(originalIdToken)
+    expect(firstRenewal.refresh_token).toBe('rt_one')
+
+    await client.forceRenew()
+    expect(mockRefresh.mock.calls[1]?.[2]).toBe('rt_one')
+    client.destroy()
+  })
 })
 
 describe('createAtolBrowserAuth -- renewal model (iframe default vs refresh opt-in)', () => {
