@@ -12,6 +12,8 @@
  * regression to per-tab behavior, not a failure.
  */
 
+import { isCredentialGeneration } from "../oidc/credential-generation"
+
 export interface CredentialsInvalidatedMessage {
   type: "credentials-invalidated"
   /** ms-since-epoch when the message was sent. */
@@ -21,6 +23,8 @@ export interface CredentialsInvalidatedMessage {
 export interface SessionEndedMessage {
   type: "session-ended"
   sentAt: number
+  /** Origin-wide logout generation resulting from the sender's invalidation. */
+  logoutGeneration: string
 }
 
 export type BroadcastMessage = CredentialsInvalidatedMessage | SessionEndedMessage
@@ -51,11 +55,21 @@ function getBroadcastChannelCtor(): (new (name: string) => BroadcastChannelShape
 
 function isBroadcastMessage(value: unknown): value is BroadcastMessage {
   if (!value || typeof value !== "object") return false
-  const message = value as { type?: unknown; sentAt?: unknown }
+  const message = value as {
+    type?: unknown
+    sentAt?: unknown
+    logoutGeneration?: unknown
+  }
+  if (
+    typeof message.sentAt !== "number" ||
+    !Number.isFinite(message.sentAt)
+  ) {
+    return false
+  }
+  if (message.type === "credentials-invalidated") return true
   return (
-    (message.type === "credentials-invalidated" || message.type === "session-ended") &&
-    typeof message.sentAt === "number" &&
-    Number.isFinite(message.sentAt)
+    message.type === "session-ended" &&
+    isCredentialGeneration(message.logoutGeneration)
   )
 }
 

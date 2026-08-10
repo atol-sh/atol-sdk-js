@@ -1,6 +1,6 @@
 {
   "name": "@atol-sh/js",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Atol core JS SDK - framework-agnostic browser security core: OIDC (PKCE), DPoP, silent renew, permissions, WebCrypto",
   "license": "Apache-2.0",
   "type": "module",
@@ -36,7 +36,9 @@
   "files": [
     "dist",
     "CHANGELOG.md",
-    "NOTICE"
+    "EXAMPLES.md",
+    "NOTICE",
+    "RESPONSE_VAULT_PROTOCOL.md"
   ],
   "publishConfig": {
     "access": "public"
@@ -62,7 +64,7 @@
     "oidc-client-ts": "^3.3.0"
   },
   "peerDependencies": {
-    "@atol-sh/fingerprint": ">=0.1.0"
+    "@atol-sh/fingerprint": "^0.2.0"
   },
   "peerDependenciesMeta": {
     "@atol-sh/fingerprint": {

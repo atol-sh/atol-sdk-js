@@ -1,4 +1,8 @@
 /**
+ * @vitest-environment-options {"url":"https://app.test/"}
+ */
+
+/**
  * seedTestSession: the test-only session bootstrap seam.
  *
  * These tests pin the security contract and the observable behavior of
@@ -17,6 +21,7 @@
  * for real. seedTestSession never calls init(), so no silent-renew / iframe
  * machinery is involved.
  */
+import 'fake-indexeddb/auto'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { makeAccessToken, makeIDToken, makeJWT } from '../helpers'
 
@@ -46,6 +51,19 @@ vi.mock('../../src/oidc/oidc', async (importOriginal) => {
   }
 })
 
+vi.mock('../../src/oidc/ordinary-authorization', async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import('../../src/oidc/ordinary-authorization')
+    >()
+  const { OrdinaryAuthorizationTestDouble } =
+    await import('./ordinary-authorization-test-double')
+  return {
+    ...actual,
+    OrdinaryBrowserAuthorization: OrdinaryAuthorizationTestDouble,
+  }
+})
+
 // Stub the silent-renew iframe path (keep LoginRequiredError real for
 // instanceof) so the init() tests below can drive the restore path without a
 // real 60s-per-attempt hidden iframe, and assert it is SKIPPED when an
@@ -54,7 +72,7 @@ vi.mock('../../src/oidc/silent-renew', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../src/oidc/silent-renew')>()
   return {
     ...actual,
-    silentAuthorizeWithRetry: vi.fn(),
+    silentAuthorizeURL: vi.fn(),
     exchangeCode: vi.fn(),
     refreshTokenGrant: vi.fn(),
     revokeToken: vi.fn().mockResolvedValue(undefined),
@@ -63,12 +81,12 @@ vi.mock('../../src/oidc/silent-renew', async (importOriginal) => {
 
 import { createAtolBrowserAuth, type AtolSession } from '../../src/client/browser-auth'
 import {
-  silentAuthorizeWithRetry,
+  silentAuthorizeURL,
   LoginRequiredError,
   type TokenResponse,
 } from '../../src/oidc/silent-renew'
 
-const mockAuthorize = vi.mocked(silentAuthorizeWithRetry)
+const mockAuthorize = vi.mocked(silentAuthorizeURL)
 
 const ISSUER = 'https://auth.atol.test'
 const CLIENT_ID = 'atol_kid_test'

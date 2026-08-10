@@ -11,6 +11,10 @@ export {
   DEFAULT_DEVICE_API_URL,
   deviceStateFromResult,
   parseSignals,
+  type DeviceAuthorization,
+  type DeviceAuthorizationOwner,
+  type DeviceAuthorizationRequest,
+  type DeviceCollectionRequest,
 } from './device/collector'
 export {
   initialDeviceState,

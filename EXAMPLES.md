@@ -15,6 +15,7 @@ const auth = createAtolBrowserAuth({
   issuer: 'https://id.atol.sh',
   clientId: 'atol_kid_abc123', // from console.atol.sh
   redirectUri: 'https://app.example.com/callback',
+  postLogoutRedirectUri: 'https://app.example.com/logout',
 })
 
 // Subscribe before init() so you see the first snapshot too.
@@ -33,7 +34,7 @@ await auth.init()
 
 // Wire a "Log in" button:
 document.querySelector('#login')?.addEventListener('click', () => {
-  void auth.beginLogin()
+  void auth.beginLogin({ returnTo: '/dashboard' })
 })
 
 // Wire a "Log out" button:
@@ -43,16 +44,17 @@ document.querySelector('#logout')?.addEventListener('click', () => {
 ```
 
 On your redirect URI page, `init()` already calls `completeLogin()`
-internally, so most apps never call it directly. If you need to complete
-the exchange explicitly (for example, to await the result before
-redirecting elsewhere in the app):
+internally, so most apps never call it directly. Pass a same-origin absolute
+path as `returnTo` when login starts. The SDK binds it to that authorization,
+keeps the registered OAuth redirect URI fixed, and restores the route with
+history navigation only after the response is verified and committed:
 
 ```ts
-const session = await auth.completeLogin()
-if (session.isAuthenticated) {
-  window.location.assign('/dashboard')
-}
+await auth.beginLogin({ returnTo: '/dashboard?tab=welcome' })
 ```
+
+Do not perform a full-page redirect after `completeLogin()`: credentials are
+memory-only, so reloading would intentionally discard them.
 
 Clean up on teardown (e.g. a single-page app tearing down a route):
 
@@ -137,7 +139,40 @@ expiry-driven schedule:
 const newAccessToken = await auth.forceRenew()
 ```
 
-## 4. Step-up re-auth with `stepUp()`
+## 4. Response-vault authorization
+
+Use response-vault v1 when the registered client has both authorization-server
+support and a same-origin relay:
+
+```ts
+const auth = createAtolBrowserAuth({
+  issuer: 'https://id.example.com',
+  clientId: 'example-spa',
+  audience: 'https://api.example.com',
+  scopes: 'openid profile email',
+  redirectUri: 'https://app.example.com/callback',
+  postLogoutRedirectUri: 'https://app.example.com/logout',
+  dpop: { required: true },
+  responseVault: true,
+})
+```
+
+The registration pins the client, audience, client origin, and clean callback.
+This mode uses no authorization response in query, fragment, form-post, or
+`postMessage`; `init()` relays and validates the server-vault result before
+publishing it. Ambiguous PAR and relay responses retry the exact server
+transaction. Acknowledgement deletes the encrypted delivery and opens a
+bounded compensation window; only after local credentials commit does
+finalization confirm adoption. If a reload loses an acknowledged success, the
+SDK rejects the unavailable family before obtaining one fresh silent grant
+because tokens are intentionally never persisted client-side. Terminal errors
+retain their exact typed classification. Invalid, superseded, or
+publication-failed grants use the same cancellation capability to revoke and
+consume the exact transaction.
+The complete wire and recovery contract is documented in
+[RESPONSE_VAULT_PROTOCOL.md](./RESPONSE_VAULT_PROTOCOL.md).
+
+## 5. Step-up re-auth with `stepUp()`
 
 When a sensitive operation returns a `step_up_required` challenge (a fresh
 authentication / second factor is needed), redirect through `stepUp()` and
@@ -167,10 +202,17 @@ Override the assurance level or accept a very recent login instead of
 forcing a brand-new one:
 
 ```ts
-await auth.stepUp({ returnTo: '/billing', maxAge: 300, acrValues: 'mfa' })
+await auth.stepUp({
+  returnTo: '/billing',
+  maxAge: 300,
+  acrValues: 'urn:example:loa:2',
+})
 ```
 
-## 5. Permission checks
+`returnTo` is same-origin transaction state; it never changes the registered
+callback URI.
+
+## 6. Permission checks
 
 ```ts
 import { createAtolBrowserAuth, loadPermissions, permissionKey } from '@atol-sh/js'
@@ -226,7 +268,7 @@ response, or a shape mismatch between requested checks and returned
 results throws rather than silently returning `true` for anything.
 Treat a thrown error the same as "no permissions granted" in your UI.
 
-## 6. Device intelligence (`./device` subpath)
+## 7. Device intelligence (`./device` subpath)
 
 Optional, and only pulls in `@atol-sh/fingerprint` (an optional peer
 dependency) when you actually import this subpath:
@@ -247,16 +289,28 @@ const collector = new DeviceCollector(DEFAULT_DEVICE_API_URL, (state) => {
   console.log('device', state.deviceId, 'known:', state.known, 'signals:', state.signals)
 })
 
-// Collect once you have an access token (or call with no token to just
-// pre-load the fingerprint agent):
-const result = await auth.getAccessToken()
-if (result) {
-  await collector.collect(result.token)
-}
+// The credential owner resolves the token and proof together for the exact
+// request. Call prepare() first if you only want to pre-load the agent.
+await collector.collect({
+  credentialGeneration: 1,
+  authorize: async ({ method, url }) => {
+    const result = await auth.getAccessToken({ dpop: { method, url } })
+    if (!result) throw new Error('No authenticated session')
+    return result.proof
+      ? {
+          scheme: 'DPoP',
+          accessToken: result.token,
+          dpopProof: result.proof,
+        }
+      : { scheme: 'Bearer', accessToken: result.token }
+  },
+})
 ```
 
 `DeviceCollector` is framework-agnostic: it dedupes concurrent `collect()`
-calls for the same token and reloads the underlying agent if the API host
-changes. A framework binding (like `@atol-sh/react`'s device hook) wraps
-this in reactive state; you can drive it directly with plain callbacks as
-shown above.
+calls for the same non-secret credential generation. Increment that generation
+whenever the session credential rotates; the new intent immediately suppresses
+late state from older requests. After `invalidate()`, the next credential
+generation must be strictly higher than every previously accepted generation.
+A framework binding (like
+`@atol-sh/react`'s device hook) wraps this in reactive state.

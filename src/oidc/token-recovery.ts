@@ -13,16 +13,81 @@
 
 /**
  * OAuth 2.0 / OIDC protocol error surfaced by the authorization server.
- * Carries the machine-readable `error` code from the token / authorize
- * endpoint response so the recovery layer can act on it precisely.
+ * Carries only a closed machine-readable code. Provider descriptions and
+ * unknown error names are untrusted diagnostic input and are never retained
+ * on a public Error object.
  */
+const OAUTH_PROTOCOL_ERROR_CODES = [
+  "access_denied",
+  "account_selection_required",
+  "authorization_pending",
+  "authorization_nonterminal",
+  "authorization_terminal",
+  "consent_required",
+  "expired_token",
+  "insufficient_scope",
+  "interaction_required",
+  "invalid_client",
+  "invalid_dpop_proof",
+  "invalid_grant",
+  "invalid_request",
+  "invalid_response",
+  "invalid_scope",
+  "invalid_token",
+  "login_required",
+  "server_error",
+  "slow_down",
+  "temporarily_unavailable",
+  "unauthorized_client",
+  "unsupported_grant_type",
+  "unsupported_response_type",
+  "use_dpop_nonce",
+] as const
+
+export type OAuthProtocolErrorCode =
+  (typeof OAUTH_PROTOCOL_ERROR_CODES)[number]
+
+export function closedOAuthProtocolErrorCode(
+  value: unknown,
+): OAuthProtocolErrorCode {
+  switch (value) {
+    case "access_denied":
+    case "account_selection_required":
+    case "authorization_pending":
+    case "authorization_nonterminal":
+    case "authorization_terminal":
+    case "consent_required":
+    case "expired_token":
+    case "insufficient_scope":
+    case "interaction_required":
+    case "invalid_client":
+    case "invalid_dpop_proof":
+    case "invalid_grant":
+    case "invalid_request":
+    case "invalid_response":
+    case "invalid_scope":
+    case "invalid_token":
+    case "login_required":
+    case "server_error":
+    case "slow_down":
+    case "temporarily_unavailable":
+    case "unauthorized_client":
+    case "unsupported_grant_type":
+    case "unsupported_response_type":
+    case "use_dpop_nonce":
+      return value
+    default:
+      return "invalid_response"
+  }
+}
+
 export class OAuthProtocolError extends Error {
-  code: string
-  description?: string
-  constructor(code: string, description?: string) {
-    super(description ? `${code}: ${description}` : code)
-    this.code = code
-    this.description = description
+  readonly code: OAuthProtocolErrorCode
+
+  constructor(code: unknown, _description?: unknown) {
+    const safeCode = closedOAuthProtocolErrorCode(code)
+    super(`OAuth protocol error: ${safeCode}`)
+    this.code = safeCode
     this.name = "OAuthProtocolError"
   }
 }
@@ -34,8 +99,8 @@ export class OAuthProtocolError extends Error {
  * OAuthProtocolError` matches the broader classification.
  */
 export class LoginRequiredError extends OAuthProtocolError {
-  constructor(description?: string) {
-    super("login_required", description)
+  constructor(_description?: unknown) {
+    super("login_required")
     this.name = "LoginRequiredError"
   }
 }
@@ -46,11 +111,23 @@ export class LoginRequiredError extends OAuthProtocolError {
  * never saw the request.
  */
 export class NetworkError extends Error {
-  cause?: unknown
-  constructor(message: string, cause?: unknown) {
+  constructor(message: string, _cause?: unknown) {
     super(message)
-    this.cause = cause
     this.name = "NetworkError"
+  }
+}
+
+/**
+ * The token request may have consumed an authorization code, but the browser
+ * did not obtain a complete usable response. Exact code replay is required so
+ * the authorization server can revoke any first family before local cleanup.
+ */
+export class AuthorizationCodeExchangeUncertainError extends NetworkError {
+  readonly code = 'authorization_code_exchange_uncertain'
+
+  constructor(message: string, _cause?: unknown) {
+    super(message)
+    this.name = 'AuthorizationCodeExchangeUncertainError'
   }
 }
 

@@ -16,7 +16,11 @@
  */
 
 // --- Keystone: config-driven browser auth client ---
-export { createAtolBrowserAuth } from './client/browser-auth'
+export {
+  AtolBrowserAuthCleanupError,
+  createAtolBrowserAuth,
+} from './client/browser-auth'
+export { RESPONSE_VAULT_PROTOCOL_VERSION } from './oidc/response-vault'
 export type {
   AtolBrowserAuth,
   AtolBrowserAuthConfig,
@@ -55,8 +59,6 @@ export {
 } from './oidc/oidc'
 export type { AuthorizationCodeCallback } from './oidc/oidc'
 export {
-  silentAuthorize,
-  silentAuthorizeWithRetry,
   exchangeCode,
   refreshTokenGrant,
   revokeToken,
@@ -64,8 +66,9 @@ export {
   DEFAULT_AUTHORIZE_TIMEOUT_MS,
   DEFAULT_SILENT_RENEW_RETRY_COUNT,
 } from './oidc/silent-renew'
-export type { TokenResponse, DPoPSigner, SilentRenewOptions } from './oidc/silent-renew'
+export type { TokenResponse, DPoPSigner } from './oidc/silent-renew'
 export {
+  AuthorizationCodeExchangeUncertainError,
   OAuthProtocolError,
   NetworkError,
   RecoveryAction,

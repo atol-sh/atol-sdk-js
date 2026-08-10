@@ -14,11 +14,16 @@ jobs:
     name: Typecheck + tests + coverage + build + audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
-          node-version: 22
+          node-version: "22.23.1"
           cache: npm
+
+      - name: Pin package npm
+        run: |
+          npm install --global --ignore-scripts --no-audit --no-fund npm@11.18.0
+          test "$(npm --version)" = "11.18.0"
 
       - name: Install
         run: npm ci
@@ -46,7 +51,7 @@ jobs:
         run: npm pack
 
       - name: Upload tarball (consumed by @atol-sh/react + console e2e)
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: atol-sh-js-tgz
           path: atol-sh-js-*.tgz

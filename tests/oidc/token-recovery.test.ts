@@ -63,7 +63,9 @@ describe("classifyRenewalError -- surface", () => {
   })
 
   it("unknown OAuth code -> Surface (conservative default)", () => {
-    expect(classifyRenewalError(new OAuthProtocolError("mystery_error"))).toBe(
+    const error = new OAuthProtocolError("mystery_error")
+    expect(error.code).toBe("invalid_response")
+    expect(classifyRenewalError(error)).toBe(
       RecoveryAction.Surface,
     )
   })
@@ -114,16 +116,18 @@ describe("backoffDelay", () => {
 })
 
 describe("OAuthProtocolError / LoginRequiredError / NetworkError shape", () => {
-  it("OAuthProtocolError carries the error code", () => {
+  it("OAuthProtocolError carries only the closed error code", () => {
     const err = new OAuthProtocolError("invalid_grant", "token gone")
     expect(err.code).toBe("invalid_grant")
-    expect(err.description).toBe("token gone")
-    expect(err.message).toBe("invalid_grant: token gone")
+    expect(err).not.toHaveProperty("description")
+    expect(err.message).toBe("OAuth protocol error: invalid_grant")
     expect(err.name).toBe("OAuthProtocolError")
   })
 
-  it("OAuthProtocolError with no description uses just the code as message", () => {
-    expect(new OAuthProtocolError("server_error").message).toBe("server_error")
+  it("OAuthProtocolError uses a stable code-derived message", () => {
+    expect(new OAuthProtocolError("server_error").message).toBe(
+      "OAuth protocol error: server_error",
+    )
   })
 
   it("LoginRequiredError is both OAuthProtocolError and LoginRequiredError", () => {
@@ -134,10 +138,23 @@ describe("OAuthProtocolError / LoginRequiredError / NetworkError shape", () => {
     expect(err.name).toBe("LoginRequiredError")
   })
 
-  it("NetworkError carries an optional cause", () => {
-    const root = new Error("underlying")
-    const err = new NetworkError("wrap", root)
-    expect(err.cause).toBe(root)
-    expect(err.name).toBe("NetworkError")
+  it("forgets arbitrary descriptions, names, and causes", () => {
+    const sentinel = "sentinel-secret-token"
+    const protocol = new OAuthProtocolError(sentinel, sentinel)
+    const network = new NetworkError(
+      "network request failed",
+      new Error(sentinel),
+    )
+
+    expect(protocol.code).toBe("invalid_response")
+    expect(protocol).not.toHaveProperty("description")
+    expect(network).not.toHaveProperty("cause")
+    expect(network.name).toBe("NetworkError")
+    for (const error of [protocol, network]) {
+      expect(JSON.stringify(error)).not.toContain(sentinel)
+      expect(String(error)).not.toContain(sentinel)
+      expect(error.stack).not.toContain(sentinel)
+      expect(Object.values(error)).not.toContain(sentinel)
+    }
   })
 })

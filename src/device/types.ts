@@ -3,8 +3,8 @@
  *
  * Wire shapes mirror the Atol control plane's identify endpoint
  * (`POST /api/v1/devices/identify`) -- the same shapes
- * `@atol-sh/fingerprint` returns from `identify()`, since that SDK
- * passes the server response through verbatim. The fingerprint package
+ * `@atol-sh/fingerprint` returns from `identify()`. Both packages validate
+ * the response before exposing it. The fingerprint package
  * is an optional peer dependency that is not statically resolvable
  * here, so the contract is mirrored locally instead of imported.
  */
@@ -43,12 +43,15 @@ export interface SmartSignals {
   emulator: boolean
   rooted: boolean
   geo_mismatch: boolean
+  device_mismatch: boolean
+  device_shared: boolean
+  shared_user_count: number
   anomaly_score: number
 }
 
 /**
  * Raw identify response from the control plane (snake_case, verbatim).
- * `signals` is null when the server computed no smart signals.
+ * The server always returns the exact smart-signal evaluation.
  */
 export interface IdentifyResult {
   device_id: string
@@ -58,7 +61,7 @@ export interface IdentifyResult {
   platform: string
   browser: string
   os_version: string
-  signals: SmartSignals | null
+  signals: SmartSignals
 }
 
 /** Device intelligence state (binding-facing, camelCase). */
@@ -84,8 +87,8 @@ export interface DeviceState {
   /** OS version reported by the server. Null before identify. */
   osVersion: string | null
 
-  /** Smart signals from server-side analysis. Null before identify or
-   * when the server returned none. */
+  /** Smart signals from server-side analysis. Null before identify, reset,
+   * or failure; every successful server response contains the exact object. */
   signals: SmartSignals | null
 
   /** Whether device intelligence is currently loading. */

@@ -25,7 +25,7 @@ import {
 const AUTHORITY = 'https://auth.atol.test'
 const JWKS_URI = 'https://auth.atol.test/jwks'
 const CLIENT_ID = 'atol_kid_test'
-const RESOURCE_AUDIENCE = 'atol-management-api'
+const RESOURCE_AUDIENCE = 'https://api.example.com'
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const keyHolder = vi.hoisted(() => ({ keys: [] as any[] }))

@@ -5,6 +5,8 @@ import {
   type BroadcastMessage,
 } from "../../src/token/token-broadcast"
 
+const LOGOUT_GENERATION = "A".repeat(43)
+
 /**
  * jsdom v16+ ships BroadcastChannel, so these tests use the real thing
  * wherever possible. The "no-op" test uninstalls it to exercise the
@@ -66,7 +68,11 @@ describe("createTokenBroadcast", () => {
     const received: BroadcastMessage[] = []
     const unsubscribe = sub.subscribe((m) => received.push(m))
 
-    pub.publish({ type: "session-ended", sentAt: Date.now() })
+    pub.publish({
+      type: "session-ended",
+      logoutGeneration: LOGOUT_GENERATION,
+      sentAt: Date.now(),
+    })
     await new Promise((r) => setTimeout(r, 20))
 
     expect(received).toHaveLength(1)
@@ -84,6 +90,12 @@ describe("createTokenBroadcast", () => {
 
     raw.postMessage({ not: "a recognized shape" })
     raw.postMessage({ type: "not-our-type", accessToken: "x" })
+    raw.postMessage({ type: "session-ended", sentAt: Date.now() })
+    raw.postMessage({
+      type: "session-ended",
+      logoutGeneration: "not-canonical",
+      sentAt: Date.now(),
+    })
     raw.postMessage(null)
     raw.postMessage("hello")
     raw.postMessage(42)
@@ -104,7 +116,11 @@ describe("createTokenBroadcast", () => {
     })
     const unsubGood = sub.subscribe(good)
 
-    pub.publish({ type: "session-ended", sentAt: Date.now() })
+    pub.publish({
+      type: "session-ended",
+      logoutGeneration: LOGOUT_GENERATION,
+      sentAt: Date.now(),
+    })
     await new Promise((r) => setTimeout(r, 20))
 
     // A throwing subscriber must not prevent the other from receiving.
@@ -122,7 +138,11 @@ describe("createTokenBroadcast", () => {
     const unsubscribe = sub.subscribe(handler)
     unsubscribe()
 
-    pub.publish({ type: "session-ended", sentAt: Date.now() })
+    pub.publish({
+      type: "session-ended",
+      logoutGeneration: LOGOUT_GENERATION,
+      sentAt: Date.now(),
+    })
     await new Promise((r) => setTimeout(r, 20))
 
     expect(handler).not.toHaveBeenCalled()
@@ -142,7 +162,11 @@ describe("createTokenBroadcast", () => {
       const bc = createTokenBroadcast("atol:test:noop")
       const handler = vi.fn()
       const unsubscribe = bc.subscribe(handler)
-      bc.publish({ type: "session-ended", sentAt: 0 })
+      bc.publish({
+        type: "session-ended",
+        logoutGeneration: LOGOUT_GENERATION,
+        sentAt: 0,
+      })
       await new Promise((r) => setTimeout(r, 5))
       expect(handler).not.toHaveBeenCalled()
       unsubscribe()

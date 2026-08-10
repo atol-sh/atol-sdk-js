@@ -1,4 +1,8 @@
 /**
+ * @vitest-environment-options {"url":"https://app.test/"}
+ */
+
+/**
  * Zero-knowledge KEK/DEK orchestration inside createAtolBrowserAuth.
  *
  * The core client owns the encryption-key flow now (it moved out of the
@@ -76,11 +80,23 @@ vi.mock('../../src/oidc/oidc', async (importOriginal) => {
   return {
     ...actual,
     createUserManager: () => manager as unknown as object,
-    readAuthorizationCodeCallback: vi.fn(async () => {
+    readAuthorizationCodeResponseState: vi.fn(async () => {
       callbackTokens = await manager.signinRedirectCallback()
+      const { credentialGenerationSnapshot } = await import(
+        '../../src/oidc/credential-generation'
+      )
       return {
+        stateId: '0123456789abcdef0123456789abcdef',
+        stateStorage: '{"state":"test"}',
+        stateCreatedAt: Math.floor(Date.now() / 1000),
         code: 'authcode',
         codeVerifier: 'verifier',
+        codeChallenge: 'A'.repeat(43),
+        credentialGeneration: credentialGenerationSnapshot({
+          issuer: ISSUER,
+          clientId: CLIENT_ID,
+          redirectUri: REDIRECT,
+        }),
         redirectUri: REDIRECT,
         nonce: 'callback-nonce',
       }
@@ -100,11 +116,23 @@ vi.mock('../../src/oidc/oidc', async (importOriginal) => {
   }
 })
 
+vi.mock('../../src/oidc/ordinary-authorization', async (importOriginal) => {
+  const actual = await importOriginal<
+    typeof import('../../src/oidc/ordinary-authorization')
+  >()
+  const { OrdinaryAuthorizationTestDouble } =
+    await import('./ordinary-authorization-test-double')
+  return {
+    ...actual,
+    OrdinaryBrowserAuthorization: OrdinaryAuthorizationTestDouble,
+  }
+})
+
 vi.mock('../../src/oidc/silent-renew', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../src/oidc/silent-renew')>()
   return {
     ...actual,
-    silentAuthorizeWithRetry: vi.fn(),
+    silentAuthorizeURL: vi.fn(),
     exchangeCode: vi.fn(),
     refreshTokenGrant: vi.fn(),
     revokeToken: vi.fn().mockResolvedValue(undefined),
@@ -124,13 +152,15 @@ vi.mock('../../src/verify/verify', () => ({
 }))
 
 import { createAtolBrowserAuth } from '../../src/client/browser-auth'
+import { rotateLogoutGeneration } from '../../src/oidc/credential-generation'
 import {
-  silentAuthorizeWithRetry,
+  silentAuthorizeURL,
   exchangeCode,
 } from '../../src/oidc/silent-renew'
 import * as encryptionModule from '../../src/crypto/encryption'
+import { KEKVault } from '../../src/crypto/kek-vault'
 
-const mockAuthorize = vi.mocked(silentAuthorizeWithRetry)
+const mockAuthorize = vi.mocked(silentAuthorizeURL)
 const mockExchange = vi.mocked(exchangeCode)
 
 const ISSUER = 'https://auth.atol.test'
@@ -291,6 +321,52 @@ describe('createAtolBrowserAuth -- KEK/DEK on a fresh login callback', () => {
     expect(session.encryptionError).toBeInstanceOf(Error)
     expect(client.getEncryptionKey()).toBeUndefined()
     expect(client.getEncryptionError()).toBeInstanceOf(Error)
+    client.destroy()
+  })
+
+  it('forgets arbitrary vault failures before exposing encryptionError', async () => {
+    const sentinel = 'sentinel-secret-vault-failure'
+    const wrapped = await wrapDEK(
+      fixtureKEK(),
+      fixtureDEK(),
+      fixtureNonce(),
+    )
+    vi.spyOn(KEKVault.prototype, 'provision').mockRejectedValue(
+      new Error(sentinel),
+    )
+    window.history.replaceState(
+      {},
+      '',
+      `/cb?code=authcode&state=xyz#atol_enc_key=${encodeURIComponent(toBase64Url(fixtureKEK()))}`,
+    )
+    manager.signinRedirectCallback.mockResolvedValue({
+      access_token: makeAccessToken(),
+      id_token: idTokenWith(wrapped),
+    })
+
+    const client = makeClient()
+    const session = await client.init()
+    const error = session.encryptionError
+
+    expect(session.encryptionKey).toBeUndefined()
+    expect(error).toBeInstanceOf(Error)
+    expect(error).toMatchObject({
+      name: 'EncryptionKeyUnavailableError',
+      code: 'encryption_key_unavailable',
+      message:
+        "Encryption key unavailable. Sign in again or clear this site's stored data.",
+    })
+    expect(error).not.toHaveProperty('cause')
+    if (!(error instanceof Error)) {
+      throw new Error('expected an Error')
+    }
+    expect(
+      [
+        error.message,
+        error.stack ?? '',
+        JSON.stringify(error),
+      ].join('\n'),
+    ).not.toContain(sentinel)
     client.destroy()
   })
 
@@ -510,6 +586,62 @@ describe('createAtolBrowserAuth -- logout clears the encryption key', () => {
     expect(client.getEncryptionKey()).toBeUndefined()
     expect(client.getEncryptionError()).toBeUndefined()
     expect(lastSession).toBeUndefined()
+    client.destroy()
+  })
+})
+
+describe('createAtolBrowserAuth -- encryption accessors enforce live authority', () => {
+  it('zeros an already-exposed DEK when getEncryptionKey observes stale authority', async () => {
+    const wrapped = await wrapDEK(fixtureKEK(), fixtureDEK(), fixtureNonce())
+    window.history.replaceState(
+      {},
+      '',
+      `/cb?code=authcode&state=xyz#atol_enc_key=${encodeURIComponent(toBase64Url(fixtureKEK()))}`,
+    )
+    manager.signinRedirectCallback.mockResolvedValue({
+      access_token: makeAccessToken(),
+      id_token: idTokenWith(wrapped),
+    })
+    const client = makeClient()
+    await client.init()
+    const exposed = client.getEncryptionKey()!
+
+    rotateLogoutGeneration({
+      issuer: ISSUER,
+      clientId: CLIENT_ID,
+      redirectUri: REDIRECT,
+    })
+
+    expect(() => client.getEncryptionKey()).toThrow(/superseded/)
+    expect(Array.from(exposed)).toEqual(new Array(32).fill(0))
+    expect(client.getEncryptionKey()).toBeUndefined()
+    client.destroy()
+  })
+
+  it('clears a derivation error when getEncryptionError observes stale authority', async () => {
+    const wrapped = await wrapDEK(fixtureKEK(), fixtureDEK(), fixtureNonce())
+    const wrongKEK = new Uint8Array(32).fill(0xaa)
+    window.history.replaceState(
+      {},
+      '',
+      `/cb?code=authcode&state=xyz#atol_enc_key=${encodeURIComponent(toBase64Url(wrongKEK))}`,
+    )
+    manager.signinRedirectCallback.mockResolvedValue({
+      access_token: makeAccessToken(),
+      id_token: idTokenWith(wrapped),
+    })
+    const client = makeClient()
+    await client.init()
+    expect(client.getEncryptionError()).toBeInstanceOf(Error)
+
+    rotateLogoutGeneration({
+      issuer: ISSUER,
+      clientId: CLIENT_ID,
+      redirectUri: REDIRECT,
+    })
+
+    expect(() => client.getEncryptionError()).toThrow(/superseded/)
+    expect(client.getEncryptionError()).toBeUndefined()
     client.destroy()
   })
 })

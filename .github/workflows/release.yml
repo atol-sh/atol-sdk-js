@@ -14,32 +14,82 @@ on:
 
 permissions:
   contents: read
-  id-token: write # OIDC token for trusted publishing + provenance
 
 jobs:
-  publish:
-    name: Build, verify, publish
-    runs-on: ubuntu-latest # cloud-hosted runner required; self-hosted unsupported
+  qualify:
+    name: Build and verify artifact
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      tarball: ${{ steps.pack.outputs.tarball }}
+      file_count: ${{ steps.pack.outputs.file_count }}
+      integrity: ${{ steps.pack.outputs.integrity }}
+      name: ${{ steps.pack.outputs.name }}
+      version: ${{ steps.pack.outputs.version }}
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
-          node-version: 22 # trusted publishing requires Node >= 22.14.0
-          cache: npm
-          registry-url: "https://registry.npmjs.org"
+          node-version: "22.23.1"
 
-      # actions/setup-node bundles npm 10.x; trusted publishing requires >= 11.5.1.
-      # Pinned, NOT npm@latest: npm 12.0.0 (2026-07) ships a broken
-      # `npm publish --provenance` that fails with "Cannot find module
-      # 'sigstore'" (its global install strips the bundled provenance deps).
-      # 11.18.0 is the last 11.x and is proven-good (published 0.1.x/0.3.x).
-      # Bump this deliberately after verifying a newer npm publishes with
-      # provenance; never float it back to @latest.
-      - name: Install a trusted-publishing-capable npm
-        run: npm install -g npm@11.18.0
+      # Qualification and publication independently authenticate the same npm
+      # archive. Neither job executes setup-node's ambient npm or mutates the
+      # runner's global toolchain.
+      - name: Bootstrap verified npm CLI
+        id: npm_cli
+        timeout-minutes: 2
+        shell: bash
+        env:
+          NPM_ARCHIVE_INTEGRITY: "sha512-T67M4L5wNm0cZ7EBLErcEkY1SmzEW/WJ+SADBzsFUY1UdAPfFHXFQtZ6SEXiK0+vzXysCvAsepbMaBTwnrAD+w=="
+          NPM_ARCHIVE_URL: "https://registry.npmjs.org/npm/-/npm-11.18.0.tgz"
+          NPM_VERSION: "11.18.0"
+        run: |
+          set -euo pipefail
 
-      - name: Install
-        run: npm ci
+          npm_archive="$(mktemp "$RUNNER_TEMP/npm-11.18.0.XXXXXX.tgz")"
+          npm_root="$(mktemp -d "$RUNNER_TEMP/npm-cli-11.18.0.XXXXXX")"
+          curl \
+            --proto '=https' \
+            --proto-redir '=https' \
+            --tlsv1.2 \
+            --fail \
+            --location \
+            --silent \
+            --show-error \
+            "$NPM_ARCHIVE_URL" \
+            --output "$npm_archive"
+
+          NPM_ARCHIVE="$npm_archive" node <<'NODE'
+          const { createHash } = require("node:crypto");
+          const { lstatSync, readFileSync } = require("node:fs");
+
+          const archive = process.env.NPM_ARCHIVE ?? "";
+          const expectedIntegrity = process.env.NPM_ARCHIVE_INTEGRITY ?? "";
+          if (!lstatSync(archive).isFile()) {
+            throw new Error("downloaded npm archive is not a regular file");
+          }
+          const actualIntegrity =
+            "sha512-" +
+            createHash("sha512").update(readFileSync(archive)).digest("base64");
+          if (actualIntegrity !== expectedIntegrity) {
+            throw new Error("downloaded npm archive integrity mismatch");
+          }
+          NODE
+
+          tar \
+            --extract \
+            --gzip \
+            --file "$npm_archive" \
+            --directory "$npm_root" \
+            --no-same-owner \
+            --no-same-permissions
+          npm_cli="$npm_root/package/bin/npm-cli.js"
+          test -f "$npm_cli"
+          test ! -L "$npm_cli"
+          test "$(node "$npm_cli" --version)" = "$NPM_VERSION"
+          printf 'path=%s\n' "$npm_cli" >> "$GITHUB_OUTPUT"
 
       - name: Verify tag matches package.json version
         run: |
@@ -50,22 +100,481 @@ jobs:
             exit 1
           fi
 
+      # Install scripts are unnecessary for this package and remain disabled so
+      # a transitive package cannot execute during release qualification.
+      - name: Install
+        env:
+          NPM_CLI: ${{ steps.npm_cli.outputs.path }}
+        run: node "$NPM_CLI" ci --ignore-scripts
+
       - name: Typecheck
-        run: npm run typecheck
+        env:
+          NPM_CLI: ${{ steps.npm_cli.outputs.path }}
+        run: node "$NPM_CLI" run typecheck
 
       - name: Unit tests (vitest)
-        run: npx vitest run
+        env:
+          NPM_CLI: ${{ steps.npm_cli.outputs.path }}
+        run: node "$NPM_CLI" test
 
       - name: Build
-        run: npm run build
+        env:
+          NPM_CLI: ${{ steps.npm_cli.outputs.path }}
+        run: node "$NPM_CLI" run build
 
       # Catch packaging (exports/types) regressions before they reach npm.
-      # attw is enforced in ci.yml on every PR; here we block on publint errors.
-      - name: Verify package (publint)
-        run: npx publint
+      - name: Verify package (publint + are-the-types-wrong)
+        env:
+          NPM_CLI: ${{ steps.npm_cli.outputs.path }}
+        run: node "$NPM_CLI" run verify:pack
 
-      # Trusted publishing: no NODE_AUTH_TOKEN. --provenance is passed explicitly
-      # (npm/cli#8730: OIDC publishes have 404'd without it despite the docs
-      # saying provenance is automatic under trusted publishing).
-      - name: Publish to npm
-        run: npm publish --provenance --access public
+      # Pack once, reject unexpected npm JSON shapes, and bind the release to
+      # the SHA-512 of the exact tarball bytes handed to the publish job.
+      - name: Pack exact release artifact
+        id: pack
+        shell: bash
+        env:
+          NPM_CLI: ${{ steps.npm_cli.outputs.path }}
+        run: |
+          set -euo pipefail
+
+          pack_json="$(node "$NPM_CLI" pack --ignore-scripts --json)"
+          PACK_JSON="$pack_json" node <<'NODE'
+          const { createHash } = require("node:crypto");
+          const {
+            appendFileSync,
+            lstatSync,
+            readFileSync,
+          } = require("node:fs");
+          const { basename } = require("node:path");
+
+          const report = JSON.parse(process.env.PACK_JSON ?? "");
+          const isObject = (value) =>
+            value !== null && typeof value === "object" && !Array.isArray(value);
+          if (
+            !Array.isArray(report) ||
+            report.length !== 1 ||
+            !isObject(report[0])
+          ) {
+            throw new Error("npm pack returned an unexpected package report");
+          }
+
+          const entry = report[0];
+          const filename = entry.filename;
+          if (
+            typeof filename !== "string" ||
+            filename !== basename(filename) ||
+            !/^[A-Za-z0-9._-]+\.tgz$/.test(filename)
+          ) {
+            throw new Error("npm pack returned an unsafe tarball filename");
+          }
+          if (!lstatSync(filename).isFile()) {
+            throw new Error(`npm pack output is not a regular file: ${filename}`);
+          }
+
+          const packageJSON = JSON.parse(readFileSync("package.json", "utf8"));
+          if (
+            !isObject(packageJSON) ||
+            entry.name !== packageJSON.name ||
+            entry.version !== packageJSON.version ||
+            entry.id !== `${packageJSON.name}@${packageJSON.version}`
+          ) {
+            throw new Error("npm pack metadata does not match package.json");
+          }
+          const publishConfig = packageJSON.publishConfig;
+          if (
+            !isObject(publishConfig) ||
+            Object.keys(publishConfig).length !== 1 ||
+            publishConfig.access !== "public"
+          ) {
+            throw new Error('package publishConfig must be exactly {"access":"public"}');
+          }
+          if (
+            !Array.isArray(entry.files) ||
+            !Number.isSafeInteger(entry.entryCount) ||
+            entry.entryCount <= 0 ||
+            entry.entryCount !== entry.files.length ||
+            entry.files.some(
+              (file) =>
+                !isObject(file) ||
+                typeof file.path !== "string" ||
+                file.path.length === 0 ||
+                !Number.isSafeInteger(file.size) ||
+                file.size < 0,
+            ) ||
+            entry.files.filter((file) => file.path === "package.json").length !== 1
+          ) {
+            throw new Error("npm pack returned an invalid package file manifest");
+          }
+          if (!Array.isArray(entry.bundled) || entry.bundled.length !== 0) {
+            throw new Error("release tarball must not contain bundled dependencies");
+          }
+
+          const integrity =
+            "sha512-" +
+            createHash("sha512").update(readFileSync(filename)).digest("base64");
+          if (entry.integrity !== integrity) {
+            throw new Error("npm pack integrity does not match the tarball bytes");
+          }
+
+          const outputFile = process.env.GITHUB_OUTPUT;
+          const summaryFile = process.env.GITHUB_STEP_SUMMARY;
+          if (!outputFile || !summaryFile) {
+            throw new Error("GitHub output files are unavailable");
+          }
+          appendFileSync(
+            outputFile,
+            [
+              `tarball=${filename}`,
+              `file_count=${entry.entryCount}`,
+              `integrity=${integrity}`,
+              `name=${entry.name}`,
+              `version=${entry.version}`,
+              "",
+            ].join("\n"),
+          );
+          appendFileSync(
+            summaryFile,
+            `Qualified \`${filename}\` with integrity \`${integrity}\`.\n`,
+          );
+          NODE
+
+      - name: Hand exact artifact to isolated publisher
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: npm-release-tarball
+          path: ${{ steps.pack.outputs.tarball }}
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  publish:
+    name: Publish qualified artifact
+    needs: qualify
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      # The OIDC-authorized job never checks out or installs project
+      # dependencies. Its executable inputs are pinned actions and npm itself.
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22.23.1"
+          registry-url: "https://registry.npmjs.org"
+
+      # The privileged job does not trust the qualification job to supply
+      # executable tooling. Download npm independently, authenticate its exact
+      # archive bytes, and invoke the extracted CLI without a global install.
+      - name: Bootstrap verified npm CLI
+        id: npm_cli
+        timeout-minutes: 2
+        shell: bash
+        env:
+          NPM_ARCHIVE_INTEGRITY: "sha512-T67M4L5wNm0cZ7EBLErcEkY1SmzEW/WJ+SADBzsFUY1UdAPfFHXFQtZ6SEXiK0+vzXysCvAsepbMaBTwnrAD+w=="
+          NPM_ARCHIVE_URL: "https://registry.npmjs.org/npm/-/npm-11.18.0.tgz"
+          NPM_VERSION: "11.18.0"
+        run: |
+          set -euo pipefail
+
+          npm_archive="$(mktemp "$RUNNER_TEMP/npm-11.18.0.XXXXXX.tgz")"
+          npm_root="$(mktemp -d "$RUNNER_TEMP/npm-cli-11.18.0.XXXXXX")"
+          curl \
+            --proto '=https' \
+            --proto-redir '=https' \
+            --tlsv1.2 \
+            --fail \
+            --location \
+            --silent \
+            --show-error \
+            "$NPM_ARCHIVE_URL" \
+            --output "$npm_archive"
+
+          NPM_ARCHIVE="$npm_archive" node <<'NODE'
+          const { createHash } = require("node:crypto");
+          const { lstatSync, readFileSync } = require("node:fs");
+
+          const archive = process.env.NPM_ARCHIVE ?? "";
+          const expectedIntegrity = process.env.NPM_ARCHIVE_INTEGRITY ?? "";
+          if (!lstatSync(archive).isFile()) {
+            throw new Error("downloaded npm archive is not a regular file");
+          }
+          const actualIntegrity =
+            "sha512-" +
+            createHash("sha512").update(readFileSync(archive)).digest("base64");
+          if (actualIntegrity !== expectedIntegrity) {
+            throw new Error("downloaded npm archive integrity mismatch");
+          }
+          NODE
+
+          tar \
+            --extract \
+            --gzip \
+            --file "$npm_archive" \
+            --directory "$npm_root" \
+            --no-same-owner \
+            --no-same-permissions
+          npm_cli="$npm_root/package/bin/npm-cli.js"
+          test -f "$npm_cli"
+          test ! -L "$npm_cli"
+          test "$(node "$npm_cli" --version)" = "$NPM_VERSION"
+          printf 'path=%s\n' "$npm_cli" >> "$GITHUB_OUTPUT"
+
+      - name: Receive qualified artifact
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: npm-release-tarball
+          path: release-artifact
+
+      # Recompute the byte digest after the cross-job handoff and bind package
+      # identity to this workflow and version to the triggering tag.
+      - name: Verify received artifact
+        id: verify
+        shell: bash
+        env:
+          ARTIFACT_DIRECTORY: release-artifact
+          EXPECTED_FILE_COUNT: ${{ needs.qualify.outputs.file_count }}
+          EXPECTED_INTEGRITY: ${{ needs.qualify.outputs.integrity }}
+          EXPECTED_NAME: ${{ needs.qualify.outputs.name }}
+          EXPECTED_TARBALL: ${{ needs.qualify.outputs.tarball }}
+          EXPECTED_VERSION: ${{ needs.qualify.outputs.version }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          node <<'NODE'
+          const { createHash } = require("node:crypto");
+          const {
+            appendFileSync,
+            lstatSync,
+            readFileSync,
+            readdirSync,
+          } = require("node:fs");
+          const { basename, dirname, resolve } = require("node:path");
+
+          const directory = resolve(process.env.ARTIFACT_DIRECTORY ?? "");
+          const filename = process.env.EXPECTED_TARBALL ?? "";
+          const expectedFileCount = process.env.EXPECTED_FILE_COUNT ?? "";
+          const expectedIntegrity = process.env.EXPECTED_INTEGRITY ?? "";
+          const expectedName = process.env.EXPECTED_NAME ?? "";
+          const expectedVersion = process.env.EXPECTED_VERSION ?? "";
+          const tagName = process.env.TAG_NAME ?? "";
+          const tagVersion = tagName.startsWith("v") ? tagName.slice(1) : "";
+
+          if (
+            filename !== basename(filename) ||
+            !/^[A-Za-z0-9._-]+\.tgz$/.test(filename)
+          ) {
+            throw new Error("qualified tarball filename is unsafe");
+          }
+          if (expectedName !== "@atol-sh/js") {
+            throw new Error("qualified package name does not match this publisher");
+          }
+          if (!tagVersion || expectedVersion !== tagVersion) {
+            throw new Error("qualified package version does not match the triggering tag");
+          }
+          if (!/^sha512-[A-Za-z0-9+/]+={0,2}$/.test(expectedIntegrity)) {
+            throw new Error("qualified package integrity is malformed");
+          }
+          if (!/^[1-9][0-9]*$/.test(expectedFileCount)) {
+            throw new Error("qualified package file count is malformed");
+          }
+
+          const entries = readdirSync(directory);
+          if (entries.length !== 1 || entries[0] !== filename) {
+            throw new Error("release artifact must contain exactly the qualified tarball");
+          }
+
+          const tarballPath = resolve(directory, filename);
+          if (dirname(tarballPath) !== directory || !lstatSync(tarballPath).isFile()) {
+            throw new Error("release artifact is not a regular file in the artifact directory");
+          }
+          const actualIntegrity =
+            "sha512-" +
+            createHash("sha512").update(readFileSync(tarballPath)).digest("base64");
+          if (actualIntegrity !== expectedIntegrity) {
+            throw new Error("received artifact integrity does not match qualification");
+          }
+
+          const outputFile = process.env.GITHUB_OUTPUT;
+          if (!outputFile) {
+            throw new Error("GitHub output file is unavailable");
+          }
+          appendFileSync(outputFile, `tarball_path=${tarballPath}\n`);
+          NODE
+
+      # Ask the same pinned npm CLI that will publish the archive to inspect its
+      # internal package.json with lifecycle scripts disabled. Qualification
+      # outputs alone are not package identity.
+      - name: Verify internal package manifest
+        shell: bash
+        env:
+          EXPECTED_FILE_COUNT: ${{ needs.qualify.outputs.file_count }}
+          EXPECTED_INTEGRITY: ${{ needs.qualify.outputs.integrity }}
+          EXPECTED_NAME: "@atol-sh/js"
+          EXPECTED_TARBALL: ${{ needs.qualify.outputs.tarball }}
+          EXPECTED_VERSION: ${{ needs.qualify.outputs.version }}
+          NPM_CLI: ${{ steps.npm_cli.outputs.path }}
+          TARBALL_PATH: ${{ steps.verify.outputs.tarball_path }}
+        run: |
+          set -euo pipefail
+
+          inspection_json="$(
+            timeout 30s node "$NPM_CLI" pack "$TARBALL_PATH" \
+              --dry-run --ignore-scripts --json
+          )"
+          manifest_path="$RUNNER_TEMP/release-package.json"
+          timeout 10s tar --extract --gzip --to-stdout \
+            --file "$TARBALL_PATH" package/package.json \
+            > "$manifest_path"
+          if [ "$(stat --format=%s "$manifest_path")" -gt 1048576 ]; then
+            echo "package.json exceeds the release manifest size limit" >&2
+            exit 1
+          fi
+
+          INSPECTION_JSON="$inspection_json" MANIFEST_PATH="$manifest_path" node <<'NODE'
+          const { readFileSync } = require("node:fs");
+
+          const report = JSON.parse(process.env.INSPECTION_JSON ?? "");
+          const manifest = JSON.parse(
+            readFileSync(process.env.MANIFEST_PATH ?? "", "utf8"),
+          );
+          const isObject = (value) =>
+            value !== null && typeof value === "object" && !Array.isArray(value);
+          const expectedFileCountText = process.env.EXPECTED_FILE_COUNT ?? "";
+          const expectedIntegrity = process.env.EXPECTED_INTEGRITY ?? "";
+          const expectedName = process.env.EXPECTED_NAME ?? "";
+          const expectedTarball = process.env.EXPECTED_TARBALL ?? "";
+          const expectedVersion = process.env.EXPECTED_VERSION ?? "";
+
+          if (!/^[1-9][0-9]*$/.test(expectedFileCountText)) {
+            throw new Error("qualified package file count is malformed");
+          }
+          const expectedFileCount = Number(expectedFileCountText);
+          if (!Number.isSafeInteger(expectedFileCount)) {
+            throw new Error("qualified package file count is unsafe");
+          }
+          if (
+            !Array.isArray(report) ||
+            report.length !== 1 ||
+            !isObject(report[0])
+          ) {
+            throw new Error("npm pack dry-run returned an unexpected package report");
+          }
+          const entry = report[0];
+          if (
+            entry.name !== expectedName ||
+            entry.version !== expectedVersion ||
+            entry.id !== `${expectedName}@${expectedVersion}` ||
+            entry.filename !== expectedTarball ||
+            entry.integrity !== expectedIntegrity
+          ) {
+            throw new Error("tarball metadata does not match the qualified release");
+          }
+          if (
+            !Array.isArray(entry.files) ||
+            entry.entryCount !== expectedFileCount ||
+            entry.files.length !== expectedFileCount ||
+            entry.files.some(
+              (file) =>
+                !isObject(file) ||
+                typeof file.path !== "string" ||
+                file.path.length === 0 ||
+                !Number.isSafeInteger(file.size) ||
+                file.size < 0,
+            ) ||
+            entry.files.filter((file) => file.path === "package.json").length !== 1
+          ) {
+            throw new Error("tarball has an invalid npm package file manifest");
+          }
+          if (!Array.isArray(entry.bundled) || entry.bundled.length !== 0) {
+            throw new Error("release tarball must not contain bundled dependencies");
+          }
+          if (
+            !isObject(manifest) ||
+            manifest.name !== expectedName ||
+            manifest.version !== expectedVersion
+          ) {
+            throw new Error("tarball package.json does not match the qualified release");
+          }
+          const publishConfig = manifest.publishConfig;
+          if (
+            !isObject(publishConfig) ||
+            Object.keys(publishConfig).length !== 1 ||
+            publishConfig.access !== "public"
+          ) {
+            throw new Error('package publishConfig must be exactly {"access":"public"}');
+          }
+          NODE
+
+      # Trusted publishing: no NODE_AUTH_TOKEN. --provenance is explicit because
+      # OIDC publishes have failed without it in affected npm CLI versions.
+      - name: Publish exact artifact to npm
+        timeout-minutes: 5
+        env:
+          NPM_CLI: ${{ steps.npm_cli.outputs.path }}
+        run: >-
+          node "$NPM_CLI" publish "${{ steps.verify.outputs.tarball_path }}"
+          --ignore-scripts --provenance --access public
+          --registry=https://registry.npmjs.org/ --tag=latest
+
+      # Registry metadata can lag the successful publish response. Poll for at
+      # most two minutes, then require byte identity with the qualified artifact.
+      - name: Verify published registry integrity
+        shell: bash
+        env:
+          EXPECTED_INTEGRITY: ${{ needs.qualify.outputs.integrity }}
+          NPM_CLI: ${{ steps.npm_cli.outputs.path }}
+          PACKAGE_NAME: ${{ needs.qualify.outputs.name }}
+          PACKAGE_VERSION: ${{ needs.qualify.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          view_error="$RUNNER_TEMP/npm-view-error.txt"
+          for attempt in $(seq 1 12); do
+            if registry_json="$(
+              timeout 5s node "$NPM_CLI" view \
+                "${PACKAGE_NAME}@${PACKAGE_VERSION}" dist.integrity \
+                --json \
+                --prefer-online \
+                --registry=https://registry.npmjs.org/ \
+                2>"$view_error"
+            )"; then
+              registry_integrity="$(
+                REGISTRY_JSON="$registry_json" node <<'NODE'
+          const value = JSON.parse(process.env.REGISTRY_JSON ?? "");
+          let integrity = value;
+          if (Array.isArray(integrity) && integrity.length === 1) {
+            [integrity] = integrity;
+          }
+          if (integrity === null) {
+            process.stdout.write("");
+          } else if (typeof integrity === "string") {
+            process.stdout.write(integrity);
+          } else {
+            throw new Error("npm view returned an unexpected dist.integrity shape");
+          }
+          NODE
+              )"
+              if [ -n "$registry_integrity" ]; then
+                if [ "$registry_integrity" != "$EXPECTED_INTEGRITY" ]; then
+                  echo "registry integrity does not match the published artifact" >&2
+                  echo "expected: $EXPECTED_INTEGRITY" >&2
+                  echo "actual:   $registry_integrity" >&2
+                  exit 1
+                fi
+                echo "Verified ${PACKAGE_NAME}@${PACKAGE_VERSION} at $EXPECTED_INTEGRITY"
+                exit 0
+              fi
+            fi
+
+            if [ "$attempt" -eq 12 ]; then
+              echo "registry did not expose dist.integrity after 12 attempts" >&2
+              if [ -s "$view_error" ]; then
+                cat "$view_error" >&2
+              fi
+              exit 1
+            fi
+            sleep 5
+          done

@@ -11,7 +11,12 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import { webcrypto as nodeWebCrypto } from "node:crypto"
-import { createDPoPKeyManager } from "../../src/dpop/dpop"
+import {
+  createDPoPKeyManager,
+  dpopKeyPair,
+  restoreDPoPKeyManager,
+  type DPoPKeyManager,
+} from "../../src/dpop/dpop"
 
 const originalCrypto = globalThis.crypto
 beforeAll(() => {
@@ -114,10 +119,31 @@ describe("createDPoPKeyManager -- availability", () => {
 })
 
 describe("createDPoPKeyManager -- key material", () => {
+  it("rejects invalid restored key handles and foreign manager objects", async () => {
+    const manager = await createDPoPKeyManager()
+    const pair = dpopKeyPair(manager!)
+    expect(() =>
+      restoreDPoPKeyManager({
+        privateKey: pair.publicKey,
+        publicKey: pair.publicKey,
+      }),
+    ).toThrow(/stored authorization key is invalid/)
+
+    const foreignManager: DPoPKeyManager = {
+      publicJWK: async () => ({}),
+      signProof: async () => "",
+      thumbprint: async () => "",
+    }
+    expect(() => dpopKeyPair(foreignManager)).toThrow(
+      /was not created by this SDK/,
+    )
+  })
+
   it("generates a non-exportable ES256 key and exports the public JWK", async () => {
     const mgr = await createDPoPKeyManager()
     expect(mgr).not.toBeNull()
     const jwk = await mgr!.publicJWK()
+    expect(Object.keys(jwk).sort()).toEqual(["crv", "kty", "x", "y"])
     expect(jwk.kty).toBe("EC")
     expect(jwk.crv).toBe("P-256")
     expect(typeof jwk.x).toBe("string")
@@ -132,10 +158,9 @@ describe("createDPoPKeyManager -- key material", () => {
     const { header } = decodeJWT(proof)
     expect(header.jwk).toBeTruthy()
     expect(header.jwk.d).toBeUndefined()
-    // Only the public EC coordinates are present.
-    expect(Object.keys(header.jwk).sort()).toEqual(
-      expect.arrayContaining(["crv", "kty", "x", "y"]),
-    )
+    expect(Object.keys(header.jwk).sort()).toEqual(["crv", "kty", "x", "y"])
+    expect(header.jwk.ext).toBeUndefined()
+    expect(header.jwk.key_ops).toBeUndefined()
     expect(header.jwk.d).toBeUndefined()
   })
 
