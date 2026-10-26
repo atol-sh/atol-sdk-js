@@ -1,6 +1,6 @@
 {
   "name": "@atol-sh/js",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Atol core JS SDK - framework-agnostic browser security core: OIDC (PKCE), DPoP, silent renew, permissions, WebCrypto",
   "license": "Apache-2.0",
   "type": "module",
