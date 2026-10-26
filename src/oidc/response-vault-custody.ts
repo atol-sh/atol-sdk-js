@@ -1,7 +1,5 @@
 import {
   assertCredentialGenerationSnapshot,
-  CredentialGenerationInvalidatedError,
-  CredentialGenerationSupersededError,
   credentialGenerationSnapshot,
   rotateLogoutGeneration,
   rotateTabOwnerGeneration,
@@ -12,16 +10,19 @@ import {
   CANONICAL_OPAQUE,
   REJECTION_CLAIM_STATUSES,
   RESPONSE_VAULT_PROTOCOL_VERSION,
-  ResponseVaultAuthorizationBindingMismatchError,
-  ResponseVaultAuthorizationInvalidatedError,
   ResponseVaultAuthenticatedTerminalError,
   ResponseVaultCleanupPendingError,
   ResponseVaultGrantRejectedError,
   ResponseVaultRejectionBlockedError,
-  ResponseVaultRejectionPendingError,
   aggregateCleanupError,
 } from './response-vault-contract'
+import { closedCustodyError } from './response-vault-custody-errors'
 import { ResponseVaultRejection } from './response-vault-rejection'
+import {
+  bindResponseVaultFailedInitialization,
+  bindResponseVaultFailedInitializationAuthority,
+  takeResponseVaultFailedInitializationAuthority,
+} from './response-vault-failed-initialization'
 import {
   claimResponseVaultRejection,
   discardResponseVaultAuthorization,
@@ -32,51 +33,12 @@ import {
   releaseResponseVaultExecution,
   responseVaultCustodyReleased,
   ResponseVaultAuthorizationBusyError,
-  ResponseVaultExecutionBusyError,
   type ResponseVaultAuthorization,
   type ResponseVaultCancellation,
   type ResponseVaultCustody,
+  type ResponseVaultExactGenerationSupersession,
   type ResponseVaultReference,
 } from './response-vault-storage'
-
-function closedCustodyError(error: unknown): Error {
-  try {
-    if (
-      error instanceof CredentialGenerationInvalidatedError ||
-      error instanceof CredentialGenerationSupersededError
-    ) {
-      return new ResponseVaultAuthorizationInvalidatedError()
-    }
-    if (error instanceof ResponseVaultExecutionBusyError) {
-      return new ResponseVaultExecutionBusyError()
-    }
-    if (error instanceof ResponseVaultAuthorizationBusyError) {
-      return new ResponseVaultAuthorizationBusyError()
-    }
-    if (error instanceof ResponseVaultAuthorizationBindingMismatchError) {
-      return new ResponseVaultAuthorizationBindingMismatchError()
-    }
-    if (error instanceof ResponseVaultAuthorizationInvalidatedError) {
-      return new ResponseVaultAuthorizationInvalidatedError()
-    }
-    if (error instanceof ResponseVaultCleanupPendingError) {
-      return new ResponseVaultCleanupPendingError(undefined)
-    }
-    if (error instanceof ResponseVaultGrantRejectedError) {
-      return new ResponseVaultGrantRejectedError()
-    }
-    if (error instanceof ResponseVaultRejectionBlockedError) {
-      return new ResponseVaultRejectionBlockedError(undefined)
-    }
-    if (error instanceof ResponseVaultRejectionPendingError) {
-      return new ResponseVaultRejectionPendingError(undefined)
-    }
-  } catch {
-    // Arbitrary caught values may be hostile proxies. Classification must
-    // never inspect or retain them beyond this closed boundary.
-  }
-  return new ResponseVaultCleanupPendingError(undefined)
-}
 
 export abstract class ResponseVaultCustodyLayer extends ResponseVaultRejection {
   invalidateLifecycle(rotateLogout = false): Promise<void> {
@@ -389,7 +351,16 @@ export abstract class ResponseVaultCustodyLayer extends ResponseVaultRejection {
     try {
       return await this.resolveActiveAuthorization(lifecycleEpoch)
     } catch (error) {
-      throw closedCustodyError(error)
+      const authority =
+        takeResponseVaultFailedInitializationAuthority(error)
+      const closed = closedCustodyError(error)
+      if (authority) {
+        throw bindResponseVaultFailedInitializationAuthority(
+          closed,
+          authority,
+        )
+      }
+      throw closed
     }
   }
 
@@ -417,7 +388,9 @@ export abstract class ResponseVaultCustodyLayer extends ResponseVaultRejection {
         // primary failure nor the caught cleanup value may reach callers.
         throw new ResponseVaultCleanupPendingError(undefined)
       }
-      throw closedCustodyError(error)
+      const closed = closedCustodyError(error)
+      if (!authorization) throw closed
+      throw bindResponseVaultFailedInitialization(closed, authorization)
     }
     const runWithCleanupPrecedence = async <T>(
       operation: () => Promise<T>,
@@ -548,20 +521,24 @@ export abstract class ResponseVaultCustodyLayer extends ResponseVaultRejection {
     return authorization
   }
 
-  private async settlePreTransactionAuthorization(
+  protected async settlePreTransactionAuthorization(
     authorization: ResponseVaultAuthorization,
     owner: string,
     supersedeInvalidatedGeneration: boolean,
+    onExecutionClaimed?: () => void,
+    exactSupersession?: ResponseVaultExactGenerationSupersession,
   ): Promise<void> {
     const claimed = await this.claimExecution(
       authorization,
       owner,
       ['prepared', 'par_pending'],
       0,
-      false,
+      !supersedeInvalidatedGeneration,
       true,
       supersedeInvalidatedGeneration,
+      exactSupersession,
     )
+    onExecutionClaimed?.()
     try {
       await this.bootstrapClient(claimed, 'terminal_only')
       throw new Error(
@@ -569,8 +546,22 @@ export abstract class ResponseVaultCustodyLayer extends ResponseVaultRejection {
       )
     } catch (error) {
       if (error instanceof ResponseVaultAuthenticatedTerminalError) {
-        this.clearActive(claimed.reference)
-        await discardResponseVaultAuthorization(claimed)
+        try {
+          await discardResponseVaultAuthorization(claimed)
+          this.rejectedReferences.add(claimed.reference.id)
+        } catch (cleanupError) {
+          throw new ResponseVaultCleanupPendingError(cleanupError)
+        }
+        try {
+          this.clearActive(claimed.reference)
+          if (this.activeReference() !== null) {
+            throw new Error(
+              'response vault: active authorization reference cleanup failed',
+            )
+          }
+        } catch (cleanupError) {
+          throw new ResponseVaultCleanupPendingError(cleanupError)
+        }
         return
       }
       await releaseResponseVaultExecution(claimed, true, false)

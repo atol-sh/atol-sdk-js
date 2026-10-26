@@ -10,6 +10,7 @@ import {
 } from './response-vault-contract'
 import {
   blockResponseVaultRejection,
+  claimFailedInitializationTerminalProbe,
   claimResponseVaultRejection,
   claimResponseVaultTerminalProbe,
   discardResponseVaultAuthorization,
@@ -20,6 +21,8 @@ import {
   type ResponseVaultAuthorization,
   type ResponseVaultCancellation,
   type ResponseVaultCustody,
+  type ResponseVaultExactGenerationSupersession,
+  ResponseVaultAuthorizationBusyError,
   ResponseVaultExecutionBusyError,
 } from './response-vault-storage'
 import {
@@ -52,6 +55,45 @@ export abstract class ResponseVaultRejection extends ResponseVaultTransport {
   protected async probePublishedTerminal(
     initial: ResponseVaultCancellation,
   ): Promise<void> {
+    await this.probeTerminal(
+      initial,
+      (owner) =>
+        claimResponseVaultTerminalProbe(
+          initial,
+          owner,
+          this.executionLeaseDuration(),
+        ),
+    )
+  }
+
+  protected async probeFailedInitializationTerminal(
+    initial: ResponseVaultCancellation,
+    requiredProvenance: 'interactive_cancel' | 'failed_init_cancel',
+    onExecutionClaimed?: () => void,
+    exactSupersession?: ResponseVaultExactGenerationSupersession,
+  ): Promise<void> {
+    const terminal = await this.probeTerminal(
+      initial,
+      (owner) =>
+        claimFailedInitializationTerminalProbe(
+          initial,
+          owner,
+          requiredProvenance,
+          this.executionLeaseDuration(),
+          exactSupersession,
+        ),
+      onExecutionClaimed,
+    )
+    if (!terminal) {
+      throw new ResponseVaultAuthorizationBusyError()
+    }
+  }
+
+  private async probeTerminal(
+    initial: ResponseVaultCancellation,
+    claim: (owner: string) => Promise<ResponseVaultCancellation>,
+    onExecutionClaimed?: () => void,
+  ): Promise<boolean> {
     if (!initial.terminalProof) {
       throw new Error(
         'response vault: terminal probe proof is unavailable',
@@ -59,11 +101,8 @@ export abstract class ResponseVaultRejection extends ResponseVaultTransport {
     }
     let cancellation: ResponseVaultCancellation | undefined
     try {
-      cancellation = await claimResponseVaultTerminalProbe(
-        initial,
-        randomOpaque(),
-        this.executionLeaseDuration(),
-      )
+      cancellation = await claim(randomOpaque())
+      onExecutionClaimed?.()
       let lastError: unknown
       for (let attempt = 0; attempt < 3; attempt++) {
         let authenticatedTerminal = false
@@ -113,14 +152,14 @@ export abstract class ResponseVaultRejection extends ResponseVaultTransport {
             throw new ResponseVaultCleanupPendingError(error)
           }
           this.rejectedReferences.add(cancellation.reference.id)
-          return
+          return true
         }
         try {
           await releaseResponseVaultCancellationExecution(cancellation)
         } catch (error) {
           throw new ResponseVaultCleanupPendingError(error)
         }
-        return
+        return false
       }
       try {
         await releaseResponseVaultCancellationExecution(cancellation)

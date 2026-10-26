@@ -28,6 +28,7 @@ export type ResponseVaultAuthorizationMode = 'interactive' | 'iframe'
 export type ResponseVaultRejectionProvenance =
   | 'internal'
   | 'interactive_cancel'
+  | 'failed_init_cancel'
 export type ResponseVaultAuthorizationStatus =
   | 'prepared'
   | 'par_pending'
@@ -242,6 +243,13 @@ export interface ResponseVaultBinding {
   redirectUri: string
   audience: string
   scope: string
+}
+
+/** Exact origin authority required to supersede one invalidated generation. */
+export interface ResponseVaultExactGenerationSupersession {
+  invalidatedGeneration: CredentialGenerationSnapshot
+  signedOutLogoutGeneration: string
+  mode: ResponseVaultAuthorizationMode
 }
 
 export interface ResponseVaultIntent {

@@ -474,7 +474,8 @@ export function validCancellationAuthority(
     (
       record.custody === 'cancellation'
         ? record.rejectionProvenance === 'internal' ||
-          record.rejectionProvenance === 'interactive_cancel'
+          record.rejectionProvenance === 'interactive_cancel' ||
+          record.rejectionProvenance === 'failed_init_cancel'
         : record.rejectionProvenance === undefined &&
           (record.mode === 'interactive' || record.mode === 'iframe')
     ) &&

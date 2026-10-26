@@ -20,6 +20,7 @@ import {
   type ResponseVaultAuthorization,
   type ResponseVaultAuthorizationStatus,
   type ResponseVaultCancellation,
+  type ResponseVaultExactGenerationSupersession,
   type ResponseVaultReference,
 } from './response-vault-storage'
 import { discoveryEnvelope } from './response-vault-wire'
@@ -153,6 +154,7 @@ export abstract class ResponseVaultContext {
     requireCurrentGeneration = true,
     requireActiveSlot = true,
     supersedeInvalidatedGeneration = false,
+    exactSupersession?: ResponseVaultExactGenerationSupersession,
   ): Promise<ResponseVaultAuthorization> {
     return claimResponseVaultExecution(
       authorization,
@@ -162,6 +164,7 @@ export abstract class ResponseVaultContext {
       requireCurrentGeneration,
       requireActiveSlot,
       supersedeInvalidatedGeneration,
+      exactSupersession,
     )
   }
 

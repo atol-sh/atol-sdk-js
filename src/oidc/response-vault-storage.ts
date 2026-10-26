@@ -19,6 +19,7 @@ export {
   type ResponseVaultCancellationBatch,
   type ResponseVaultCustody,
   type ResponseVaultExecutionClaim,
+  type ResponseVaultExactGenerationSupersession,
   type ResponseVaultIntent,
   type ResponseVaultReference,
   type ResponseVaultRejectionProvenance,
@@ -82,3 +83,4 @@ export {
   releaseResponseVaultAuthorization,
   responseVaultCustodyReleased,
 } from './response-vault-storage-lifecycle'
+export { claimFailedInitializationTerminalProbe } from './response-vault-storage-failed-initialization'

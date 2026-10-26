@@ -18,6 +18,9 @@ import {
   type PushedAuthorizationResponse,
   type ResponseVaultGrant,
 } from './response-vault-contract'
+import {
+  bindResponseVaultFailedInitialization,
+} from './response-vault-failed-initialization'
 import { ResponseVaultRelay } from './response-vault-relay'
 import {
   bindResponseVaultBootstrap,
@@ -311,31 +314,41 @@ export abstract class ResponseVaultAdmission extends ResponseVaultRelay {
       this.assertExpectedGeneration(authorization, expectedGeneration)
       return authorization
     } catch (error) {
-      if (error instanceof ResponseVaultExecutionBusyError) {
-        throw error
-      }
-      if (authorization?.transactionId && authorization.csrfToken) {
-        return this.rejectAfterFailure(authorization, error)
-      }
-      if (authorization?.executionClaim) {
-        if (error instanceof ResponseVaultAuthenticatedTerminalError) {
-          this.clearActive(authorization.reference)
-          await discardResponseVaultAuthorization(authorization)
-        } else if (
-          authorization.status === 'prepared' ||
-          authorization.status === 'par_pending'
-        ) {
-          await releaseResponseVaultExecution(
-            authorization,
-            true,
-            false,
-          )
-        } else {
-          this.clearActive(authorization.reference)
-          await discardResponseVaultAuthorization(authorization)
+      try {
+        if (error instanceof ResponseVaultExecutionBusyError) {
+          throw error
         }
+        if (authorization?.transactionId && authorization.csrfToken) {
+          return await this.rejectAfterFailure(authorization, error)
+        }
+        if (authorization?.executionClaim) {
+          if (error instanceof ResponseVaultAuthenticatedTerminalError) {
+            this.clearActive(authorization.reference)
+            await discardResponseVaultAuthorization(authorization)
+          } else if (
+            authorization.status === 'prepared' ||
+            authorization.status === 'par_pending'
+          ) {
+            await releaseResponseVaultExecution(
+              authorization,
+              true,
+              false,
+            )
+          } else {
+            this.clearActive(authorization.reference)
+            await discardResponseVaultAuthorization(authorization)
+          }
+        }
+        throw error
+      } catch (failure) {
+        if (authorization) {
+          throw bindResponseVaultFailedInitialization(
+            failure,
+            authorization,
+          )
+        }
+        throw failure
       }
-      throw error
     }
   }
 

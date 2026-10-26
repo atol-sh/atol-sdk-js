@@ -14,6 +14,9 @@ import { settleRecoveredOrdinaryAuthorization } from '../oidc/ordinary-authoriza
 import {
   LoginRequiredError,
 } from '../oidc/silent-renew'
+import {
+  takeResponseVaultFailedInitializationAuthority,
+} from '../oidc/response-vault-failed-initialization'
 import { createTokenBroadcast } from '../token/token-broadcast'
 import type {
   BrowserAuthLifecycleOperations,
@@ -285,7 +288,7 @@ export function createBrowserAuthLifecycleOperations(
       }
       return runtime.sessionOps.session()
     }
-    runtime.initPromise = (async () => {
+    const initialization = (async () => {
       await ensureRuntimeInitialized()
       const startupAuthority = currentCredentialAuthority(
         runtime.credentialGenerationBinding,
@@ -340,7 +343,20 @@ export function createBrowserAuthLifecycleOperations(
       }
       return runtime.sessionOps.session()
     })()
-    return runtime.initPromise
+    runtime.initPromise = initialization
+    try {
+      return await initialization
+    } catch (error) {
+      if (runtime.initPromise === initialization) {
+        runtime.initRejected = true
+        runtime.failedInitCancellationAuthority =
+          runtime.responseVault === null
+            ? null
+            : takeResponseVaultFailedInitializationAuthority(error) ?? null
+        runtime.failedInitRestartInvalidation = null
+      }
+      throw error
+    }
   }
 
   return {

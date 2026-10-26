@@ -1,5 +1,12 @@
 import { restoreDPoPKeyManager } from '../dpop/dpop'
-import { credentialGenerationSnapshot } from './credential-generation'
+import {
+  credentialGenerationSnapshot,
+  currentCredentialAuthority,
+  isCredentialGeneration,
+} from './credential-generation'
+import {
+  ResponseVaultFailedInitializationModeMismatchError,
+} from './response-vault-failed-initialization'
 import {
   RESPONSE_VAULT_CANONICAL_OPAQUE as CANONICAL_OPAQUE,
   RESPONSE_VAULT_DEFAULT_EXECUTION_LEASE_MS as DEFAULT_EXECUTION_LEASE_MS,
@@ -13,6 +20,7 @@ import {
   type ResponseVaultCancellation,
   type ResponseVaultCustody,
   type ResponseVaultExecutionClaim,
+  type ResponseVaultExactGenerationSupersession,
   type ResponseVaultRecord,
   type ResponseVaultSlotRecord,
 } from './response-vault-model'
@@ -242,12 +250,39 @@ export async function claimResponseVaultRejection(
   requireCurrentGeneration = true,
   requireActiveSlot = false,
   supersedeInvalidatedGeneration = false,
-  requiredProvenance?: 'interactive_cancel',
+  requiredProvenance?:
+    | 'interactive_cancel'
+    | 'failed_init_cancel',
+  exactFailureMode?: ResponseVaultAuthorizationMode,
+  exactSupersession?: ResponseVaultExactGenerationSupersession,
 ): Promise<ResponseVaultCancellation> {
+  const requiredMode = requiredProvenance === undefined
+    ? undefined
+    : requiredProvenance === 'interactive_cancel'
+      ? 'interactive'
+      : 'iframe'
   if (
     !CANONICAL_OPAQUE.test(owner) ||
     allowedStatuses.length === 0 ||
-    !validExecutionLeaseDuration(leaseDurationMs)
+    !validExecutionLeaseDuration(leaseDurationMs) ||
+    (exactFailureMode !== undefined && exactFailureMode !== requiredMode) ||
+    (
+      exactSupersession !== undefined &&
+      (
+        !supersedeInvalidatedGeneration ||
+        requireCurrentGeneration ||
+        exactFailureMode !== exactSupersession.mode ||
+        !isCredentialGeneration(
+          exactSupersession.signedOutLogoutGeneration,
+        ) ||
+        !isCredentialGeneration(
+          exactSupersession.invalidatedGeneration.logout,
+        ) ||
+        !isCredentialGeneration(
+          exactSupersession.invalidatedGeneration.tabOwner,
+        )
+      )
+    )
   ) {
     throw new Error('response vault: invalid rejection claim')
   }
@@ -285,13 +320,16 @@ export async function claimResponseVaultRejection(
       ) {
         throw new ResponseVaultExecutionBusyError()
       }
-      if (requiredProvenance === 'interactive_cancel') {
+      if (requiredProvenance !== undefined) {
         const hasCancellationCustody =
           record.custody === 'cancellation'
-        const provesInteractiveCancellation = hasCancellationCustody
-          ? record.rejectionProvenance === 'interactive_cancel'
-          : record.mode === 'interactive'
-        if (!provesInteractiveCancellation) {
+        const provesRequiredCancellation = hasCancellationCustody
+          ? record.rejectionProvenance === requiredProvenance
+          : record.mode === requiredMode
+        if (!provesRequiredCancellation) {
+          if (exactFailureMode !== undefined) {
+            throw new ResponseVaultFailedInitializationModeMismatchError()
+          }
           throw new ResponseVaultExecutionBusyError()
         }
       }
@@ -315,10 +353,26 @@ export async function claimResponseVaultRejection(
             'response vault: invalid rejection supersession claim',
           )
         }
-        supersedesGeneration = !sameCredentialGeneration(
-          credentialGenerationSnapshot(authorization.binding),
-          record.credentialGeneration,
-        )
+        if (exactSupersession) {
+          const currentAuthority = currentCredentialAuthority(
+            authorization.binding,
+          )
+          supersedesGeneration =
+            currentAuthority.signedOut &&
+            currentAuthority.generation ===
+              exactSupersession.signedOutLogoutGeneration &&
+            sameCredentialGeneration(
+              record.credentialGeneration,
+              exactSupersession.invalidatedGeneration,
+            ) &&
+            record.credentialGeneration.logout !==
+              exactSupersession.signedOutLogoutGeneration
+        } else {
+          supersedesGeneration = !sameCredentialGeneration(
+            credentialGenerationSnapshot(authorization.binding),
+            record.credentialGeneration,
+          )
+        }
         if (!supersedesGeneration) {
           throw new ResponseVaultExecutionBusyError()
         }

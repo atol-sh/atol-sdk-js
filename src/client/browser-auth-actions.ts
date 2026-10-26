@@ -4,7 +4,11 @@ import {
   credentialGenerationForLogin,
   credentialGenerationSnapshot,
   currentCredentialAuthority,
+  type CredentialGenerationSnapshot,
 } from '../oidc/credential-generation'
+import {
+  cancelResponseVaultFailedInitialization,
+} from '../oidc/response-vault-login-cancellation'
 import {
   authorizationState,
 } from '../oidc/oidc'
@@ -22,6 +26,7 @@ import type {
   StepUpOptions,
 } from './browser-auth'
 import type { BrowserAuthRuntime } from './browser-auth-context'
+import { createBrowserAuthLoginRestart } from './browser-auth-login-restart'
 import { AtolBrowserAuthCleanupError } from './browser-auth-diagnostics'
 import {
   CANONICAL_ULID,
@@ -36,6 +41,9 @@ export function createBrowserAuthActions(
   async function beginLoginOnce(
     options?: BeginLoginOptions,
     precedingLogout?: Promise<void> | null,
+    onGeneration?: (
+      generation: CredentialGenerationSnapshot,
+    ) => void,
   ): Promise<void> {
     const returnTo = normalizeSameOriginReturnTo(
       options?.returnTo,
@@ -45,6 +53,7 @@ export function createBrowserAuthActions(
     const authorizationGeneration = credentialGenerationForLogin(
       runtime.credentialGenerationBinding,
     )
+    onGeneration?.(authorizationGeneration)
     const authorizationEpoch = runtime.credentialEpoch
     await runtime.credentialMutationTail
     await runtime.lifecycleOps.ensureRuntimeInitialized()
@@ -109,6 +118,9 @@ export function createBrowserAuthActions(
   function beginLogin(
     options?: BeginLoginOptions,
   ): Promise<void> {
+    if (runtime.restartLoginInFlight) {
+      return runtime.restartLoginInFlight
+    }
     const cancellation = runtime.cancelLoginInFlight
     const logout = runtime.logoutInFlight
     return runtime.enqueueAuthorizationAction(async () => {
@@ -280,6 +292,13 @@ export function createBrowserAuthActions(
 
   function logout(): Promise<void> {
     if (runtime.logoutInFlight) return runtime.logoutInFlight
+    if (runtime.restartLoginInFlight) {
+      return Promise.reject(
+        new Error(
+          'logout is unavailable while login restart is in progress',
+        ),
+      )
+    }
     const operation = logoutOnce().finally(() => {
       if (runtime.logoutInFlight === operation) {
         runtime.logoutInFlight = null
@@ -293,8 +312,15 @@ export function createBrowserAuthActions(
     if (!runtime.responseVault) {
       throw new Error('cancelLogin requires response-vault authorization')
     }
+    const recoverableFailedInitialization =
+      runtime.initPromise !== null &&
+      runtime.initRejected &&
+      runtime.failedInitCancellationAuthority !== null &&
+      !runtime.lifecycleOps.isCallbackUrl() &&
+      !runtime.lifecycleOps.isPostLogoutCallbackUrl()
     if (
-      runtime.initPromise !== null ||
+      (runtime.initPromise !== null &&
+        !recoverableFailedInitialization) ||
       runtime.completeLoginPromise !== null ||
       runtime.currentUser !== null ||
       runtime.accessToken !== undefined ||
@@ -308,13 +334,36 @@ export function createBrowserAuthActions(
     if (runtime.destroyed) {
       throw new Error('auth client has been destroyed')
     }
-    await runtime.responseVault.cancelLogin(() => {
+    const markCleanupOwned = () => {
       runtime.destroyAuthorizationCleanupStarted = true
-    })
+    }
+    if (recoverableFailedInitialization) {
+      await cancelResponseVaultFailedInitialization(
+        runtime.responseVault,
+        runtime.failedInitCancellationAuthority as NonNullable<
+          typeof runtime.failedInitCancellationAuthority
+        >,
+        markCleanupOwned,
+      )
+    } else {
+      await runtime.responseVault.cancelLogin(markCleanupOwned)
+    }
+    if (recoverableFailedInitialization) {
+      runtime.initPromise = null
+      runtime.initRejected = false
+      runtime.failedInitCancellationAuthority = null
+    }
   }
 
   function cancelLogin(): Promise<void> {
     if (runtime.cancelLoginInFlight) return runtime.cancelLoginInFlight
+    if (runtime.restartLoginInFlight) {
+      return Promise.reject(
+        new Error(
+          'cancelLogin is unavailable while login restart is in progress',
+        ),
+      )
+    }
     if (runtime.logoutInFlight) {
       return Promise.reject(
         new Error(
@@ -509,6 +558,9 @@ export function createBrowserAuthActions(
     }
   }
 
+  const { canRestartLogin, restartLogin } =
+    createBrowserAuthLoginRestart(runtime, beginLoginOnce)
+
   return {
     init: () => runtime.lifecycleOps.init(),
     beginLogin,
@@ -531,6 +583,8 @@ export function createBrowserAuthActions(
       return runtime.encError
     },
     cancelLogin,
+    canRestartLogin,
+    restartLogin,
     logout,
     forceRenew: () => runtime.renewalOps.forceRenew(),
     signDPoPProof,

@@ -6,6 +6,8 @@ import {
 import {
   assertCredentialGenerationSnapshot,
   credentialGenerationSnapshot,
+  currentCredentialAuthority,
+  isCredentialGeneration,
   type CredentialGenerationSnapshot,
 } from './credential-generation'
 import {
@@ -26,6 +28,7 @@ import {
   type ResponseVaultBinding,
   type ResponseVaultCancellation,
   type ResponseVaultExecutionClaim,
+  type ResponseVaultExactGenerationSupersession,
   type ResponseVaultIntent,
   type ResponseVaultRecord,
   type ResponseVaultSecrets,
@@ -227,12 +230,29 @@ export async function claimResponseVaultExecution(
   requireCurrentGeneration = true,
   requireActiveSlot = true,
   supersedeInvalidatedGeneration = false,
+  exactSupersession?: ResponseVaultExactGenerationSupersession,
 ): Promise<ResponseVaultAuthorization> {
   if (
     !CANONICAL_OPAQUE.test(owner) ||
     allowedStatuses.length === 0 ||
     allowedStatuses.includes('navigating') ||
-    !validExecutionLeaseDuration(leaseDurationMs)
+    !validExecutionLeaseDuration(leaseDurationMs) ||
+    (
+      exactSupersession !== undefined &&
+      (
+        !supersedeInvalidatedGeneration ||
+        requireCurrentGeneration ||
+        !isCredentialGeneration(
+          exactSupersession.signedOutLogoutGeneration,
+        ) ||
+        !isCredentialGeneration(
+          exactSupersession.invalidatedGeneration.logout,
+        ) ||
+        !isCredentialGeneration(
+          exactSupersession.invalidatedGeneration.tabOwner,
+        )
+      )
+    )
   ) {
     throw new Error('response vault: invalid execution claim')
   }
@@ -298,15 +318,35 @@ export async function claimResponseVaultExecution(
             'response vault: invalid generation supersession claim',
           )
         }
-        const currentGeneration = credentialGenerationSnapshot(
-          authorization.binding,
-        )
-        const supersedesGeneration = !sameCredentialGeneration(
-          currentGeneration,
-          record.credentialGeneration,
-        )
-        if (!supersedesGeneration) {
-          throw new ResponseVaultExecutionBusyError()
+        if (exactSupersession) {
+          const currentAuthority = currentCredentialAuthority(
+            authorization.binding,
+          )
+          if (
+            !currentAuthority.signedOut ||
+            currentAuthority.generation !==
+              exactSupersession.signedOutLogoutGeneration ||
+            record.mode !== exactSupersession.mode ||
+            !sameCredentialGeneration(
+              record.credentialGeneration,
+              exactSupersession.invalidatedGeneration,
+            ) ||
+            record.credentialGeneration.logout ===
+              exactSupersession.signedOutLogoutGeneration
+          ) {
+            throw new ResponseVaultExecutionBusyError()
+          }
+        } else {
+          const currentGeneration = credentialGenerationSnapshot(
+            authorization.binding,
+          )
+          const supersedesGeneration = !sameCredentialGeneration(
+            currentGeneration,
+            record.credentialGeneration,
+          )
+          if (!supersedesGeneration) {
+            throw new ResponseVaultExecutionBusyError()
+          }
         }
       }
       if (!renewsExactClaim) {

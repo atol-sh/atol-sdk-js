@@ -523,4 +523,49 @@ describe('public response-vault protocol', () => {
     expect(iframe.parentNode).toBeNull()
     await completeGrantPublication(grant)
   })
+
+  it('surfaces a settled iframe login_required result without rejecting it again', async () => {
+    const captured = installFetch([
+      bootstrap(OPAQUE_A),
+      pushed(),
+      issuerBootstrap(OPAQUE_C),
+      noContent(),
+      jsonResponse(
+        { version: 1, error: 'login_required', csrf_token: OPAQUE_D },
+        400,
+      ),
+      noContent(),
+    ])
+    const nativeCreateElement = document.createElement.bind(document)
+    const iframe = nativeCreateElement('iframe')
+    Object.defineProperty(iframe, 'contentWindow', {
+      configurable: true,
+      value: { location: { href: REDIRECT } },
+    })
+    vi.spyOn(document, 'createElement').mockImplementation(((
+      tagName: string,
+    ) =>
+      tagName.toLowerCase() === 'iframe'
+        ? iframe
+        : nativeCreateElement(tagName)) as typeof document.createElement)
+
+    const pending = newVault().authorizeInIframe({ prompt: 'none' })
+    await vi.waitFor(() => expect(iframe.parentNode).toBe(document.body))
+    iframe.dispatchEvent(new Event('load'))
+
+    await expect(pending).rejects.toBeInstanceOf(LoginRequiredError)
+    expect(
+      captured.filter((request) => request.url.endsWith('/relay')),
+    ).toHaveLength(1)
+    expect(
+      captured.filter((request) => request.url.endsWith('/acknowledge')),
+    ).toHaveLength(1)
+    expect(
+      captured.filter((request) => request.url.endsWith('/finalize')),
+    ).toHaveLength(1)
+    expect(
+      captured.filter((request) => request.url.endsWith('/reject')),
+    ).toHaveLength(0)
+    expectNoActiveReference()
+  })
 })

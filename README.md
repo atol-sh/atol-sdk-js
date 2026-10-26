@@ -124,7 +124,11 @@ freshness check and renews immediately; `stepUp()` forces re-authentication
 (`prompt=login`, `max_age=0`, `acr_values=mfa` by default) for a sensitive
 operation that requires a fresh auth; `selectOrganization(id)` starts a
 distinct silent organization grant and exposes the selected ID on
-`AtolSession.organizationId`; `signDPoPProof(method, url)` signs a
+`AtolSession.organizationId`; `restartLogin()` explicitly settles the exact
+response-vault authorization that made signed-out initialization fail, then
+starts one fresh login; `canRestartLogin()` reports whether this runtime holds
+the hidden exact authority required for that operation;
+`signDPoPProof(method, url)` signs a
 standalone RFC 9449 proof for a request to your own protected resource;
 `isDPoPActive()` reports whether DPoP is actually in effect (it can be
 `false` even when `dpop: true` was requested, if WebCrypto is unavailable);
@@ -255,7 +259,8 @@ This is a security library first. Key properties:
   `BroadcastChannel` remain signed out even if the IdP session cookie still
   exists. Failed attempts retain exact in-memory revocation and ID-token-hint
   custody for a same-runtime retry. Only an explicit `beginLogin()` clears
-  the tombstone under a fresh generation.
+  the tombstone under a fresh generation; successful `restartLogin()` does so
+  only after the abandoned authorization has been settled.
 - **Exact abandoned-login cancellation.** In response-vault mode,
   `cancelLogin()` is available only before client initialization on a
   signed-out browser. It claims and rejects the exact pending interactive
@@ -275,6 +280,21 @@ This is a security library first. Key properties:
   requests are unavailable until logout finishes. Destroy cleanup is re-armed
   only after a later explicit login successfully establishes new interactive
   custody. Unsupported modes and initialized clients reject.
+- **Explicit closed-tab restart.** If `init()` rejects while a signed-out
+  replacement tab finds response-vault custody abandoned by a closed tab,
+  ordinary `cancelLogin()` remains same-tab scoped and returns a busy error
+  without sending rejection. `restartLogin()` first persists and rechecks a
+  new origin-wide signed-out generation owned by that restart only while the
+  captured generation is still current, clears local
+  session state, and then fences only the failure-time reference, binding,
+  mode, full old generation, and active slot. A fresh authorization starts
+  exactly once and only after `/reject` returns an empty 204 or an authenticated
+  terminal-only probe returns 410. Ambiguous responses, authenticated 409,
+  local cleanup failure, or a concurrently superseded logout generation retain
+  the initialization failure for an exact retry and start no new PAR.
+  `canRestartLogin()` is the read-only UI capability check; generic startup,
+  callback, logout, successful initialization, and destroyed states return
+  `false` and are never promoted into restart authority.
 
 Found a vulnerability? See [SECURITY.md](./SECURITY.md) for how to report
 it privately.

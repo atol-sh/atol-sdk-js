@@ -5,6 +5,9 @@ import {
   type ResponseVaultEndpoints,
   type ResponseVaultGrant,
 } from './response-vault-contract'
+import {
+  bindResponseVaultFailedInitialization,
+} from './response-vault-failed-initialization'
 import { ResponseVaultAdmission } from './response-vault-admission'
 import {
   beginResponseVaultNavigation,
@@ -18,6 +21,17 @@ import { releaseExecutionLockIfHeld } from './response-vault-storage-lock'
 import { NetworkError } from './token-recovery'
 
 export abstract class ResponseVaultNavigation extends ResponseVaultAdmission {
+  private relayAfterIframeCallback(
+    authorization: ResponseVaultAuthorization,
+  ): Promise<ResponseVaultGrant> {
+    return this.relay(authorization).catch((error) => {
+      throw bindResponseVaultFailedInitialization(
+        error,
+        authorization,
+      )
+    })
+  }
+
   async beginInteractive(
     intent: ResponseVaultIntent = {},
     expectedGeneration?: CredentialGenerationSnapshot,
@@ -151,89 +165,99 @@ export abstract class ResponseVaultNavigation extends ResponseVaultAdmission {
     intent: ResponseVaultIntent,
     expectedGeneration?: CredentialGenerationSnapshot,
   ): Promise<ResponseVaultGrant> {
-    const lifecycleEpoch = this.lifecycleEpoch()
-    const existing = await this.activeAuthorization(lifecycleEpoch)
-    let authorization: ResponseVaultAuthorization
-    if (existing) {
-      authorization = existing
-      this.assertExpectedGeneration(authorization, expectedGeneration)
-      if (authorization.mode !== 'iframe') {
-        throw new Error('response vault: another authorization is active')
-      }
-      if (!sameIntent(authorization.intent, intent)) {
-        throw new Error(
-          'response vault: another authorization intent is active',
-        )
-      }
-      if (
-        authorization.status === 'relay_retry' ||
-        authorization.status === 'redeeming'
-      ) {
-        authorization = await this.claimExecution(
-          authorization,
-          randomOpaque(),
-          [authorization.status],
-        )
-        return this.relay(authorization)
-      }
-    }
-    authorization = await this.start(
-      'iframe',
-      intent,
-      expectedGeneration,
-    )
+    let authorization: ResponseVaultAuthorization | undefined
     try {
-      const endpoints = await this.endpointRegistry()
-      const iframeTimeout =
-        this.config.iframeTimeoutMs ?? DEFAULT_IFRAME_TIMEOUT_MS
-      const executionOwner = authorization.executionClaim?.owner
-      if (!executionOwner) {
-        throw new Error(
-          'response vault: iframe execution owner is unavailable',
+      const lifecycleEpoch = this.lifecycleEpoch()
+      const existing = await this.activeAuthorization(lifecycleEpoch)
+      if (existing) {
+        authorization = existing
+        this.assertExpectedGeneration(authorization, expectedGeneration)
+        if (authorization.mode !== 'iframe') {
+          throw new Error('response vault: another authorization is active')
+        }
+        if (!sameIntent(authorization.intent, intent)) {
+          throw new Error(
+            'response vault: another authorization intent is active',
+          )
+        }
+        if (
+          authorization.status === 'relay_retry' ||
+          authorization.status === 'redeeming'
+        ) {
+          authorization = await this.claimExecution(
+            authorization,
+            randomOpaque(),
+            [authorization.status],
+          )
+          return this.relayAfterIframeCallback(authorization)
+        }
+      }
+      authorization = await this.start(
+        'iframe',
+        intent,
+        expectedGeneration,
+      )
+      try {
+        const endpoints = await this.endpointRegistry()
+        const iframeTimeout =
+          this.config.iframeTimeoutMs ?? DEFAULT_IFRAME_TIMEOUT_MS
+        const executionOwner = authorization.executionClaim?.owner
+        if (!executionOwner) {
+          throw new Error(
+            'response vault: iframe execution owner is unavailable',
+          )
+        }
+        authorization = await beginResponseVaultNavigation(
+          authorization,
+          Math.min(authorization.expiresAt, Date.now() + iframeTimeout),
+        )
+        await this.waitForCleanIframeCallback(
+          authorization,
+          endpoints.authorization,
+        )
+        authorization = await claimResponseVaultNavigation(
+          authorization,
+          executionOwner,
+          'iframe',
+          this.executionLeaseDuration(),
+        )
+        return this.relayAfterIframeCallback(authorization)
+      } catch (error) {
+        if (error instanceof ResponseVaultAuthorizationBusyError) {
+          throw error
+        }
+        if (authorization.status === 'navigating') {
+          const owner = authorization.navigationOwner
+          if (!owner) {
+            throw new Error(
+              'response vault: iframe navigation owner is unavailable',
+            )
+          }
+          try {
+            const cancellation = await claimResponseVaultRejection(
+              authorization,
+              owner,
+              ['navigating'],
+              this.executionLeaseDuration(),
+            )
+            return await this.rejectAfterFailure(cancellation, error)
+          } catch (claimError) {
+            if (claimError instanceof ResponseVaultAuthorizationBusyError) {
+              throw error
+            }
+            throw claimError
+          }
+        }
+        return await this.rejectAfterFailure(authorization, error)
+      }
+    } catch (error) {
+      if (authorization) {
+        throw bindResponseVaultFailedInitialization(
+          error,
+          authorization,
         )
       }
-      authorization = await beginResponseVaultNavigation(
-        authorization,
-        Math.min(authorization.expiresAt, Date.now() + iframeTimeout),
-      )
-      await this.waitForCleanIframeCallback(
-        authorization,
-        endpoints.authorization,
-      )
-      authorization = await claimResponseVaultNavigation(
-        authorization,
-        executionOwner,
-        'iframe',
-        this.executionLeaseDuration(),
-      )
-      return await this.relay(authorization)
-    } catch (error) {
-      if (error instanceof ResponseVaultAuthorizationBusyError) {
-        throw error
-      }
-      if (authorization.status === 'navigating') {
-        const owner = authorization.navigationOwner
-        if (!owner) {
-          throw new Error(
-            'response vault: iframe navigation owner is unavailable',
-          )
-        }
-        try {
-          const cancellation = await claimResponseVaultRejection(
-            authorization,
-            owner,
-            ['navigating'],
-            this.executionLeaseDuration(),
-          )
-          return this.rejectAfterFailure(cancellation, error)
-        } catch (claimError) {
-          if (claimError instanceof ResponseVaultAuthorizationBusyError) {
-            throw error
-          }
-          throw claimError
-        }
-      }
-      return this.rejectAfterFailure(authorization, error)
+      throw error
     }
   }
 }

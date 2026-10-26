@@ -273,14 +273,21 @@ export function persistedCredentialAuthority(
 export function rotateLogoutGeneration(
   binding: CredentialGenerationBinding,
 ): string {
-  const authority = writeAuthority(
-    binding,
-    AUTHORITY_STATUS_SIGNED_OUT,
+  const storage = browserStorage(binding, 'local')
+  const key = logoutGenerationStorageKey(binding)
+  const generation = randomGeneration()
+  storage.setItem(
+    key,
+    serializedAuthority(generation, AUTHORITY_STATUS_SIGNED_OUT),
   )
-  if (!authority.signedOut) {
+  const authority = parseAuthority(storage.getItem(key))
+  if (
+    authority.status !== AUTHORITY_STATUS_SIGNED_OUT ||
+    authority.generation !== generation
+  ) {
     throw new Error('credential generation: logout was superseded')
   }
-  return authority.generation
+  return generation
 }
 
 /**

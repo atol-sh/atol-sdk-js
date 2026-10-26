@@ -16,6 +16,9 @@ import {
   ResponseVault,
   type ResponseVaultGrant,
 } from '../oidc/response-vault'
+import type {
+  ResponseVaultFailedInitializationAuthority,
+} from '../oidc/response-vault-failed-initialization'
 import type { TokenResponse } from '../oidc/silent-renew'
 import { normalizeSameOriginReturnTo } from '../oidc/return-to'
 import type { TokenBroadcast } from '../token/token-broadcast'
@@ -182,6 +185,14 @@ export class BrowserAuthRuntime {
   removeCredentialGenerationStorageListener: (() => void) | null = null
   logoutInFlight: Promise<void> | null = null
   cancelLoginInFlight: Promise<void> | null = null
+  restartLoginInFlight: Promise<void> | null = null
+  failedInitRestartInvalidation: {
+    readonly referenceId: string
+    readonly logoutGeneration: string
+    readonly published: boolean
+    readonly settled: boolean
+    readonly authorizationGeneration?: Readonly<CredentialGenerationSnapshot>
+  } | null = null
   pendingLogoutRefreshToken: string | undefined
   pendingLogoutIdToken: string | undefined
   credentialEpoch = 0
@@ -190,6 +201,9 @@ export class BrowserAuthRuntime {
   destroyUserStoreCleanupStarted = false
   completeLoginPromise: Promise<AtolSession> | null = null
   initPromise: Promise<AtolSession> | null = null
+  initRejected = false
+  failedInitCancellationAuthority:
+    ResponseVaultFailedInitializationAuthority | null = null
 
   readonly subscribers = new Set<(session: AtolSession) => void>()
   private userStoreTail: Promise<void> = Promise.resolve()

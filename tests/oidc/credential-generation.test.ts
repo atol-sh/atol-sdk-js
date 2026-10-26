@@ -95,6 +95,58 @@ describe('credential generations', () => {
     })).toBe(next)
   })
 
+  it('does not claim a concurrent signed-out generation as its own', () => {
+    const descriptor = Object.getOwnPropertyDescriptor(
+      window,
+      'localStorage',
+    )
+    expect(descriptor).toBeDefined()
+    const backing = window.localStorage
+    let superseded = false
+    const interleaved: Storage = {
+      get length() {
+        return backing.length
+      },
+      clear: () => backing.clear(),
+      getItem: (key) => backing.getItem(key),
+      key: (index) => backing.key(index),
+      removeItem: (key) => backing.removeItem(key),
+      setItem: (key, value) => {
+        backing.setItem(key, value)
+        const parsed = JSON.parse(value) as {
+          status?: unknown
+        }
+        if (!superseded && parsed.status === 'signed_out') {
+          superseded = true
+          backing.setItem(
+            key,
+            JSON.stringify({
+              version: 1,
+              generation: 'Z'.repeat(43),
+              status: 'signed_out',
+            }),
+          )
+        }
+      },
+    }
+    Object.defineProperty(window, 'localStorage', {
+      configurable: true,
+      value: interleaved,
+    })
+
+    try {
+      expect(() => rotateLogoutGeneration(binding)).toThrow(
+        'credential generation: logout was superseded',
+      )
+      expect(currentCredentialAuthority(binding)).toEqual({
+        generation: 'Z'.repeat(43),
+        signedOut: true,
+      })
+    } finally {
+      Object.defineProperty(window, 'localStorage', descriptor!)
+    }
+  })
+
   it('overwrites corrupt logout state instead of blocking invalidation', () => {
     window.localStorage.setItem(
       window.localStorage.key(0) ?? 'unrelated',

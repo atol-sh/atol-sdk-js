@@ -295,6 +295,24 @@ export interface AtolBrowserAuth {
    */
   cancelLogin(): Promise<void>
   /**
+   * Whether this runtime holds the exact hidden failed-initialization
+   * authority required by {@link AtolBrowserAuth.restartLogin}. This is a
+   * read-only lifecycle capability, not a probe of arbitrary durable custody.
+   */
+  canRestartLogin(): boolean
+  /**
+   * Recover from a rejected, signed-out response-vault initialization caused
+   * by an authorization abandoned in another tab. The SDK first invalidates
+   * the abandoned origin-wide generation, then rejects only the exact durable
+   * reference, binding, mode, generation, and active slot captured by
+   * `init()`. A fresh authorization starts only after authenticated server
+   * settlement and local custody release complete.
+   *
+   * Concurrent callers share one operation. Ordinary `cancelLogin()` remains
+   * same-tab only and will not adopt custody merely because a tab owner differs.
+   */
+  restartLogin(options?: BeginLoginOptions): Promise<void>
+  /**
    * Persist durable signed-out authority, clear local state, attempt refresh
    * revocation, then redirect to the end_session endpoint with a one-use
    * callback state. Any observable teardown or navigation failure rejects

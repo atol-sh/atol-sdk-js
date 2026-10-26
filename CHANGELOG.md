@@ -6,6 +6,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `AtolBrowserAuth.canRestartLogin()` exposes a read-only capability for UI
+  recovery, and `restartLogin()` explicitly restarts only the exact
+  response-vault authorization captured by a rejected signed-out
+  initialization.
+
+### Security
+
+- Cross-tab restart first owns and persists a new signed-out generation,
+  clears local session state, and exact-fences the abandoned reference,
+  binding, mode, full generation, and active slot. Ambiguous settlement,
+  contention, supersession before or during restart, and cleanup failure remain
+  fail-closed and start
+  no replacement authorization.
+
 ## [0.3.0] - Staged, unpublished
 
 This staged release consolidates every change since the last published version,
