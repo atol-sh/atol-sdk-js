@@ -12,7 +12,8 @@ repeats that exact verified npm bootstrap. It rehashes the received tarball,
 uses `npm pack <tarball> --dry-run --ignore-scripts --json` to verify its exact package
 identity, file count, sole `package.json`, empty bundled dependency set, and
 public-only publish configuration, then publishes those exact bytes with
-provenance. It boundedly waits for npm to report the same SHA-512 integrity.
+provenance. It waits up to ten minutes for npm to report the same SHA-512
+integrity after a successful publish.
 There is no `NPM_TOKEN` in CI.
 
 npm has no first-publish-via-OIDC yet ([npm/cli#8544](https://github.com/npm/cli/issues/8544)):
@@ -54,7 +55,7 @@ token.
    name, version, package id, file count, sole `package.json`, empty bundled
    dependency set, exact `publishConfig: {"access":"public"}`, regular-file
    shape, and SHA-512. It publishes through the explicitly selected public
-   registry and `latest` tag, then polls npm for at most two minutes and
+   registry and `latest` tag, then polls npm for up to ten minutes and
    requires `dist.integrity` to match.
 4. Confirm the version landed on [npmjs.com/package/@atol-sh/js](https://www.npmjs.com/package/@atol-sh/js)
    and that the GitHub Actions run shows a provenance attestation.

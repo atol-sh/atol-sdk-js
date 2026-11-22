@@ -252,7 +252,7 @@ jobs:
     name: Publish qualified artifact
     needs: qualify
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     permissions:
       contents: read
       id-token: write
@@ -519,8 +519,8 @@ jobs:
           --ignore-scripts --provenance --access public
           --registry=https://registry.npmjs.org/ --tag=latest
 
-      # Registry metadata can lag the successful publish response. Poll for at
-      # most two minutes, then require byte identity with the qualified artifact.
+      # Registry metadata can lag a successful publish response. Allow up to
+      # ten minutes, then require byte identity with the qualified artifact.
       - name: Verify published registry integrity
         shell: bash
         env:
@@ -532,9 +532,14 @@ jobs:
           set -euo pipefail
 
           view_error="$RUNNER_TEMP/npm-view-error.txt"
-          for attempt in $(seq 1 12); do
+          deadline=$((SECONDS + 600))
+          while remaining=$((deadline - SECONDS)); [ "$remaining" -gt 0 ]; do
+            lookup_timeout=5
+            if [ "$remaining" -lt "$lookup_timeout" ]; then
+              lookup_timeout=$remaining
+            fi
             if registry_json="$(
-              timeout 5s node "$NPM_CLI" view \
+              timeout "${lookup_timeout}s" node "$NPM_CLI" view \
                 "${PACKAGE_NAME}@${PACKAGE_VERSION}" dist.integrity \
                 --json \
                 --prefer-online \
@@ -569,12 +574,15 @@ jobs:
               fi
             fi
 
-            if [ "$attempt" -eq 12 ]; then
-              echo "registry did not expose dist.integrity after 12 attempts" >&2
-              if [ -s "$view_error" ]; then
-                cat "$view_error" >&2
-              fi
-              exit 1
+            remaining=$((deadline - SECONDS))
+            if [ "$remaining" -gt 0 ] && [ "$remaining" -lt 5 ]; then
+              sleep "$remaining"
+            elif [ "$remaining" -ge 5 ]; then
+              sleep 5
             fi
-            sleep 5
           done
+          echo "registry did not expose dist.integrity within ten minutes" >&2
+          if [ -s "$view_error" ]; then
+            cat "$view_error" >&2
+          fi
+          exit 1
