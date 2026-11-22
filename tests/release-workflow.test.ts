@@ -169,7 +169,7 @@ describe('release workflow', () => {
       'node "$NPM_CLI" publish "${{ steps.verify.outputs.tarball_path }}"',
     )
     const registryIndex = workflow.indexOf(
-      'timeout 5s node "$NPM_CLI" view',
+      'deadline=$((SECONDS + 600))',
     )
 
     expect(verifyIndex).toBeGreaterThan(-1)
@@ -215,7 +215,7 @@ describe('release workflow', () => {
     expect(publisher).toContain(
       'node "$NPM_CLI" publish "${{ steps.verify.outputs.tarball_path }}"',
     )
-    expect(publisher).toContain('timeout 5s node "$NPM_CLI" view')
+    expect(publisher).toContain('timeout "${lookup_timeout}s" node "$NPM_CLI" view')
     expect(publisher).toContain(
       '--registry=https://registry.npmjs.org/ --tag=latest',
     )
@@ -240,7 +240,19 @@ describe('release workflow', () => {
     expect(workflow).toContain(
       'entries.length !== 1 || entries[0] !== filename',
     )
-    expect(workflow).toContain('for attempt in $(seq 1 12)')
+    expect(publisher).toContain('timeout-minutes: 20')
+    expect(publisher).toContain('deadline=$((SECONDS + 600))')
+    expect(publisher).toContain(
+      'while remaining=$((deadline - SECONDS)); [ "$remaining" -gt 0 ]; do',
+    )
+    expect(publisher).toContain('lookup_timeout=5')
+    expect(publisher).toContain(
+      'if [ "$remaining" -lt "$lookup_timeout" ]; then',
+    )
+    expect(publisher).toContain('lookup_timeout=$remaining')
+    expect(publisher).toContain('timeout "${lookup_timeout}s" node "$NPM_CLI" view')
+    expect(publisher).toContain('remaining=$((deadline - SECONDS))')
+    expect(publisher).toContain('sleep "$remaining"')
     expect(workflow).toContain('sleep 5')
     expect(workflow).toContain(
       'registry_integrity" != "$EXPECTED_INTEGRITY',
