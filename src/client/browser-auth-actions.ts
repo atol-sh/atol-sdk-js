@@ -271,6 +271,9 @@ export function createBrowserAuthActions(
         await runtime.manager.signoutRedirect({
           post_logout_redirect_uri:
             runtime.postLogoutRedirectUri,
+          // The audience is an authorization parameter, not a logout
+          // parameter. Override oidc-client-ts's global extraQueryParams.
+          extraQueryParams: {},
           ...(runtime.pendingLogoutIdToken
             ? { id_token_hint: runtime.pendingLogoutIdToken }
             : {}),

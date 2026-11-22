@@ -6,6 +6,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-22
+
+### Fixed
+
+- RP-initiated logout no longer sends the authorization-only `audience` query
+  parameter. Audience-configured clients can sign out through Atol's strict
+  OIDC logout endpoint.
+
+## [0.4.0] - 2026-10-26
+
 ### Added
 
 - `AtolBrowserAuth.canRestartLogin()` exposes a read-only capability for UI

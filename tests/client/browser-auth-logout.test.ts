@@ -343,6 +343,24 @@ describe('createAtolBrowserAuth -- logout', () => {
     client.destroy()
   })
 
+  it('omits the authorization audience from logout parameters', async () => {
+    mockAuthorize.mockRejectedValue(new LoginRequiredError())
+    const client = createAtolBrowserAuth({
+      issuer: ISSUER,
+      clientId: CLIENT_ID,
+      redirectUri: REDIRECT,
+      audience: 'atol-management-api',
+    })
+    await client.init()
+
+    await client.logout()
+
+    expect(manager.signoutRedirect).toHaveBeenCalledWith(
+      expect.objectContaining({ extraQueryParams: {} }),
+    )
+    client.destroy()
+  })
+
   it.each([
     'not a URL',
     'https://evil.test/logout',
