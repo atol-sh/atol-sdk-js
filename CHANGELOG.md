@@ -6,6 +6,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-11-23
+
+### Fixed
+
+- Ordinary browser authorization reports a typed intent conflict when a
+  different sign-in is still pending in the tab. The error distinguishes a
+  silent request from an interactive one without exposing authorization data.
+- `cancelLogin()` can abandon an ordinary sign-in after exact authenticated
+  settlement. A lost initial PAR challenge is recovered and bound before the
+  SDK sends cancellation. Changing sign-in options never cancels implicitly.
+
 ## [0.4.1] - 2026-11-22
 
 ### Fixed

@@ -198,6 +198,17 @@ This is a security library first. Key properties:
   not use hidden CORS response headers as authority. Missing, unexposed,
   repeated, or unequal signals retain or settle custody and never authorize
   navigation or cleanup.
+- **Pending ordinary sign-in.** A failed request can leave resumable
+  authorization in that browser tab. `OrdinaryAuthorizationPendingError`
+  indicates that the outcome is uncertain. For an interrupted login start,
+  retry with the same `beginLogin()` options. If a different sign-in is still
+  pending, the SDK throws `OrdinaryAuthorizationIntentConflictError` with
+  `pendingMode` set to `silent` or `interactive`. Let the user explicitly
+  start over by calling `cancelLogin()` on an uninitialized client in the
+  same tab, then call `beginLogin()` with the new options after cancellation
+  succeeds. Keep any pending callback URL available for SDK recovery until
+  the authorization settles. To start a separate sign-in, open the app in
+  a new browser tab without copying the previous tab's session state.
 - **Response vault.** A response-vault client stores a bounded authorization
   transaction and non-extractable key handle in IndexedDB, with
   only an opaque same-tab reference in `sessionStorage`. One durable
@@ -279,7 +290,12 @@ This is a security library first. Key properties:
   therefore awaits an earlier queued cancellation; later cancellation
   requests are unavailable until logout finishes. Destroy cleanup is re-armed
   only after a later explicit login successfully establishes new interactive
-  custody. Unsupported modes and initialized clients reject.
+  custody. An initialized client with an active session rejects cancellation.
+  For ordinary browser authorization, `cancelLogin()` requires an
+  uninitialized client and the exact current tab generation. If a request
+  was submitted, the SDK requires the issuer's authenticated cancellation
+  before permitting a different sign-in. A lost initial challenge is
+  recovered with the original capability-free request before cancellation.
 - **Explicit closed-tab restart.** If `init()` rejects while a signed-out
   replacement tab finds response-vault custody abandoned by a closed tab,
   ordinary `cancelLogin()` remains same-tab scoped and returns a busy error

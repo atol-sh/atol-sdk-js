@@ -22,6 +22,7 @@ import {
   installOrdinaryAuthorizationLocks,
   installOrdinaryTransport,
   ordinaryAdmittedResponse,
+  ordinaryAttemptChallenge,
   ordinaryHarness,
   ordinaryParCalls,
   ordinaryPreNavigationCalls,
@@ -216,6 +217,7 @@ describe('ordinary browser authorization authenticated signal', () => {
         headers.set('Atol-Browser-Authorization', signal)
       }
       const transport = installOrdinaryTransport([
+        ordinaryAttemptChallenge(now + 800_000),
         new Response(await admittedBody(), {
           status: 201,
           headers,
@@ -231,9 +233,9 @@ describe('ordinary browser authorization authenticated signal', () => {
 
       const par = ordinaryParCalls(transport)
       const cancellation = ordinaryPreNavigationCalls(transport)
-      expect(par).toHaveLength(1)
+      expect(par).toHaveLength(2)
       expect(cancellation).toHaveLength(1)
-      expect(cancellation[0][1].body).toBe(par[0][1].body)
+      expect(cancellation[0][1].body).toBe(par[1][1].body)
       expect(await readOrdinaryAuthorizationRecords()).toEqual([])
       expect(flow.navigations).toEqual([])
     },
@@ -242,6 +244,7 @@ describe('ordinary browser authorization authenticated signal', () => {
   it('rejects an authenticated 201 before the mandatory attempt challenge', async () => {
     const transport = installOrdinaryTransport([
       ordinaryAdmittedResponse(now + 800_000),
+      ordinaryAttemptChallenge(now + 800_000),
     ])
     const flow = ordinaryHarness()
 
@@ -251,8 +254,15 @@ describe('ordinary browser authorization authenticated signal', () => {
       'ordinary browser authorization request was rejected',
     )
 
-    expect(ordinaryParCalls(transport)).toHaveLength(1)
-    expect(ordinaryPreNavigationCalls(transport)).toHaveLength(1)
+    const par = ordinaryParCalls(transport)
+    expect(par).toHaveLength(2)
+    expect(par[1][1].body).toBe(par[0][1].body)
+    const cancellation = ordinaryPreNavigationCalls(transport)
+    expect(cancellation).toHaveLength(1)
+    const cancelled = new URLSearchParams(String(cancellation[0][1].body))
+    expect(cancelled.has('atol_attempt_capability')).toBe(true)
+    cancelled.delete('atol_attempt_capability')
+    expect(cancelled.toString()).toBe(par[0][1].body)
     expect(await readOrdinaryAuthorizationRecords()).toEqual([])
     expect(flow.navigations).toEqual([])
   })

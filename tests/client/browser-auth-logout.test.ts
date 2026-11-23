@@ -22,11 +22,24 @@ import { currentCredentialAuthority } from '../../src/oidc/credential-generation
 import { OrdinaryAuthorizationPendingError } from '../../src/oidc/ordinary-authorization'
 
 describe('createAtolBrowserAuth -- logout', () => {
-  it('rejects login cancellation outside response-vault mode', async () => {
+  it('ordinary cancellation with no pending login is a no-op', async () => {
     const auth = makeClient()
 
+    await expect(auth.cancelLogin()).resolves.toBeUndefined()
+    expect(manager.signoutRedirect).not.toHaveBeenCalled()
+    auth.destroy()
+  })
+
+  it('cannot cancel an established ordinary session', async () => {
+    window.history.replaceState({}, '', '/cb?code=authcode&state=xyz')
+    manager.signinRedirectCallback.mockResolvedValue({
+      access_token: makeAccessToken(),
+      id_token: makeIDToken(),
+    })
+    const auth = makeClient()
+    await expect(auth.init()).resolves.toMatchObject({ isAuthenticated: true })
     await expect(auth.cancelLogin()).rejects.toThrow(
-      'cancelLogin requires response-vault authorization',
+      'cancelLogin requires an uninitialized signed-out client',
     )
     expect(manager.signoutRedirect).not.toHaveBeenCalled()
     auth.destroy()

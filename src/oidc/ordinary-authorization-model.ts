@@ -193,6 +193,16 @@ export class OrdinaryAuthorizationPendingError extends Error {
   }
 }
 
+/** An existing browser authorization must settle before its intent can change. */
+export class OrdinaryAuthorizationIntentConflictError extends Error {
+  constructor(readonly pendingMode: 'silent' | 'interactive') {
+    super(
+      'An earlier sign-in is unfinished. Retry that sign-in, or sign in from a new tab.',
+    )
+    this.name = 'OrdinaryAuthorizationIntentConflictError'
+  }
+}
+
 export function validCanonicalSHA256(value: string): boolean {
   if (!CANONICAL_SHA256.test(value)) return false
   try {

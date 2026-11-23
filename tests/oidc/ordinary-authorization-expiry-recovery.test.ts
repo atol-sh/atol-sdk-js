@@ -69,6 +69,7 @@ describe('ordinary submitted-expiry recovery', () => {
     const resumedAt = now + 26 * 60 * 1000
     vi.spyOn(Date, 'now').mockReturnValue(now)
     const transport = installOrdinaryTransport([
+      ordinaryAttemptChallenge(now + 800_000),
       new TypeError('PAR response lost'),
       ordinaryAttemptChallenge(resumedAt + 800_000),
       ordinaryAdmittedResponse(resumedAt + 800_000),
@@ -78,7 +79,7 @@ describe('ordinary submitted-expiry recovery', () => {
     await expect(
       flow.authorization.begin(ordinaryStart(flow.generation)),
     ).rejects.toBeInstanceOf(OrdinaryAuthorizationPendingError)
-    const submittedBody = ordinaryParCalls(transport)[0][1].body
+    const submittedBody = ordinaryParCalls(transport)[1][1].body
     const submittedState = new URLSearchParams(
       String(submittedBody),
     ).get('state')
@@ -91,7 +92,7 @@ describe('ordinary submitted-expiry recovery', () => {
       'ordinary browser authorization request was rejected',
     )
 
-    expect(ordinaryParCalls(transport)).toHaveLength(1)
+    expect(ordinaryParCalls(transport)).toHaveLength(2)
     expect(ordinaryPreNavigationCalls(transport)[0][1].body).toBe(
       submittedBody,
     )
@@ -102,8 +103,8 @@ describe('ordinary submitted-expiry recovery', () => {
 
     await flow.authorization.begin(ordinaryStart(flow.generation))
 
-    expect(ordinaryParCalls(transport)).toHaveLength(3)
-    const freshBody = ordinaryParCalls(transport)[1][1].body
+    expect(ordinaryParCalls(transport)).toHaveLength(4)
+    const freshBody = ordinaryParCalls(transport)[2][1].body
     expect(freshBody).not.toBe(submittedBody)
     expect(
       new URLSearchParams(String(freshBody)).get('state'),
@@ -117,7 +118,7 @@ describe('ordinary submitted-expiry recovery', () => {
     const now = 1_800_000_000_000
     vi.spyOn(Date, 'now').mockReturnValue(now)
     const transport = installOrdinaryTransport(
-      [new TypeError('PAR response lost')],
+      [ordinaryAttemptChallenge(now + 800_000), new TypeError('PAR response lost')],
       undefined,
       [],
       [new TypeError('cancellation response lost')],
@@ -135,7 +136,7 @@ describe('ordinary submitted-expiry recovery', () => {
       flow.authorization.begin(ordinaryStart(flow.generation)),
     ).rejects.toBeInstanceOf(OrdinaryAuthorizationPendingError)
 
-    expect(ordinaryParCalls(transport)).toHaveLength(1)
+    expect(ordinaryParCalls(transport)).toHaveLength(2)
     expect(ordinaryPreNavigationCalls(transport)).toHaveLength(1)
     expect(await readOrdinaryAuthorizationRecords()).toMatchObject([
       {

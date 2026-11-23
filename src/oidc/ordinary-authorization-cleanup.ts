@@ -121,8 +121,8 @@ export class OrdinaryAuthorizationCleanupController {
   private async rejectSubmittedAndCleanup(
     record: OrdinaryAuthorizationRecord,
   ): Promise<void> {
-    await cancelSubmittedOrdinaryAuthorization(record)
-    await this.startAndFinishCleanup(record)
+    const settled = await cancelSubmittedOrdinaryAuthorization(record)
+    await this.startAndFinishCleanup(settled)
   }
 
   async terminalOnlyAndCleanup(
@@ -166,6 +166,7 @@ export class OrdinaryAuthorizationCleanupController {
       }
       return
     }
+    if (pointer) this.assertExactPointer(record)
     assertOrdinaryAuthorizationRecord(
       record,
       this.binding,

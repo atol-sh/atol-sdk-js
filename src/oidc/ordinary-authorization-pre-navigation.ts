@@ -5,6 +5,10 @@ import {
 } from './ordinary-authorization-model'
 import { ordinaryAuthorizationPARBody } from './ordinary-authorization-protocol'
 import { hasAuthenticatedOrdinaryAuthorizationSignal } from './ordinary-authorization-settlement'
+import {
+  bindOrdinaryPARChallenge,
+  postOrdinaryPAR,
+} from './ordinary-authorization-transport'
 
 function assertSubmittedCancellation(
   record: OrdinaryAuthorizationRecord,
@@ -32,7 +36,7 @@ function assertSubmittedCancellation(
  */
 export async function cancelSubmittedOrdinaryAuthorization(
   record: OrdinaryAuthorizationRecord,
-): Promise<void> {
+): Promise<OrdinaryAuthorizationRecord> {
   assertSubmittedCancellation(record)
   const controller = new AbortController()
   const timeout = setTimeout(
@@ -40,10 +44,22 @@ export async function cancelSubmittedOrdinaryAuthorization(
     SETTLEMENT_TIMEOUT_MS,
   )
   try {
+    let submitted = record
+    if (record.attemptExpiresAtMs === null) {
+      // A capability-free PAR can only obtain a challenge. The exact
+      // capability is required for authenticated cancellation.
+      const challenge = await postOrdinaryPAR(record, controller.signal)
+      submitted = await bindOrdinaryPARChallenge(
+        record,
+        challenge.response,
+        challenge.startedAt,
+        controller.signal,
+      )
+    }
     let response: Response
     try {
       response = await fetch(
-        record.preNavigationCancellationEndpoint,
+        submitted.preNavigationCancellationEndpoint,
         {
           method: 'POST',
           headers: {
@@ -51,7 +67,7 @@ export async function cancelSubmittedOrdinaryAuthorization(
             'Content-Type':
               'application/x-www-form-urlencoded',
           },
-          body: ordinaryAuthorizationPARBody(record),
+          body: ordinaryAuthorizationPARBody(submitted),
           cache: 'no-store',
           credentials: 'omit',
           redirect: 'error',
@@ -71,6 +87,7 @@ export async function cancelSubmittedOrdinaryAuthorization(
     ) {
       throw new OrdinaryAuthorizationPendingError()
     }
+    return submitted
   } finally {
     clearTimeout(timeout)
   }

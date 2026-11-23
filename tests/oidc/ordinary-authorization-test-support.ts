@@ -214,6 +214,9 @@ export function installOrdinaryTransport(
         url ===
         `${ORDINARY_ISSUER}/auth/par/pre-navigation-cancellation`
       ) {
+        if (!new URLSearchParams(String(init?.body)).has('atol_attempt_capability')) {
+          throw new Error('pre-navigation cancellation requires an attempt capability')
+        }
         const result = preNavigation[preNavigationIndex++]
         if (result instanceof Error) throw result
         if (result) return browserVisibleOrdinaryResponse(result)

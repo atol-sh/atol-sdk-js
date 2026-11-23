@@ -18,11 +18,16 @@ import {
 import { bytesToBase64Url } from '../../src/crypto/base64url'
 import { createDPoPKeyManager } from '../../src/dpop/dpop'
 import {
+  OrdinaryAuthorizationIntentConflictError,
+  OrdinaryAuthorizationPendingError,
+  createAtolBrowserAuth,
+} from '../../src/index'
+import {
   credentialGenerationForLogin,
+  rotateLogoutGeneration,
   type CredentialGenerationSnapshot,
 } from '../../src/oidc/credential-generation'
 import {
-  OrdinaryAuthorizationPendingError,
   OrdinaryBrowserAuthorization,
   type OrdinaryAuthorizationStart,
 } from '../../src/oidc/ordinary-authorization'
@@ -132,6 +137,7 @@ function admittedResponse(
 function installTransport(
   par: Array<Response | Error>,
   metadata: Record<string, unknown> = discovery(),
+  cancellationResponses: Response[] = [],
 ): ReturnType<typeof vi.fn> {
   let parIndex = 0
   const transport = vi.fn(
@@ -154,7 +160,7 @@ function installTransport(
         `${ISSUER}/auth/par/pre-navigation-cancellation`
       ) {
         return browserVisibleOrdinaryResponse(
-          new Response(null, {
+          cancellationResponses.shift() ?? new Response(null, {
             status: 204,
             headers: {
               'Access-Control-Allow-Origin': 'https://app.test',
@@ -279,6 +285,15 @@ function pointerValue(): Record<string, unknown> {
     }
   }
   throw new Error('ordinary authorization pointer is missing')
+}
+
+function createPublicOrdinaryClient() {
+  return createAtolBrowserAuth({
+    issuer: ISSUER,
+    clientId: CLIENT_ID,
+    redirectUri: REDIRECT_URI,
+    scopes: SCOPE,
+  })
 }
 
 beforeAll(() => {
@@ -430,7 +445,7 @@ describe('ordinary browser PAR authorization custody', () => {
       flow.authorization.begin(
         start(flow.generation, { returnTo: '/different' }),
       ),
-    ).rejects.toThrow(/custody binding mismatch/)
+    ).rejects.toBeInstanceOf(OrdinaryAuthorizationIntentConflictError)
     const changedRegistration = harness('openid email')
     await expect(
       changedRegistration.authorization.begin(
@@ -440,6 +455,155 @@ describe('ordinary browser PAR authorization custody', () => {
 
     expect(parCalls(transport)).toHaveLength(1)
     expect(parCalls(transport)[0][1].body).toBe(originalBody)
+  })
+
+  it.each(['silent', 'interactive'] as const)(
+    'reports a pending %s sign-in when startup and interactive intents conflict',
+    async (pendingMode) => {
+      const now = 1_800_000_000_000
+      vi.spyOn(Date, 'now').mockReturnValue(now)
+      const transport = installTransport([
+        new TypeError('lost response'),
+        ordinaryAttemptChallenge(now + 14 * 60 * 1000),
+        admittedResponse(now + 14 * 60 * 1000),
+      ])
+      const first = harness()
+      const interactive = {
+        returnTo: '/',
+        dpopEnabled: false,
+        dpopRequired: false,
+      }
+      const silent = { ...interactive, prompt: 'none' }
+      const original = pendingMode === 'silent' ? silent : interactive
+      const replacement = pendingMode === 'silent' ? interactive : silent
+
+      await expect(
+        first.authorization.begin(start(first.generation, original)),
+      ).rejects.toBeInstanceOf(OrdinaryAuthorizationPendingError)
+      const reloaded = harness()
+      await expect(
+        reloaded.authorization.begin(start(reloaded.generation, replacement)),
+      ).rejects.toMatchObject({
+        name: 'OrdinaryAuthorizationIntentConflictError',
+        pendingMode,
+      })
+      expect(parCalls(transport)).toHaveLength(1)
+      expect(reloaded.navigations).toHaveLength(0)
+
+      await reloaded.authorization.begin(start(reloaded.generation, original))
+      const calls = parCalls(transport)
+      expect(calls).toHaveLength(3)
+      expect(calls[1][1].body).toBe(calls[0][1].body)
+      expect(reloaded.navigations).toHaveLength(1)
+    },
+  )
+
+  it.each(['first', 'second'] as const)(
+    'cancels exact custody after the %s PAR response is lost before changing intent',
+    async (stage) => {
+      const now = 1_800_000_000_000
+      vi.spyOn(Date, 'now').mockReturnValue(now)
+      const deadline = now + 14 * 60 * 1000
+      const challenge = ordinaryAttemptChallenge(deadline)
+      const lostResponse = new TypeError('lost response')
+      const transport = installTransport([
+        ...(stage === 'first' ? [lostResponse, challenge] : [challenge, lostResponse]),
+        ordinaryAttemptChallenge(deadline),
+        admittedResponse(deadline),
+      ])
+      const flow = harness()
+      const client = createPublicOrdinaryClient()
+      const original = { prompt: 'none', returnTo: '/' }
+      const replacement = { returnTo: '/' }
+      const startingURL = window.location.href
+
+      await expect(flow.authorization.begin(start(flow.generation, original)))
+        .rejects.toBeInstanceOf(OrdinaryAuthorizationPendingError)
+      await expect(flow.authorization.begin(start(flow.generation, replacement)))
+        .rejects.toBeInstanceOf(OrdinaryAuthorizationIntentConflictError)
+      await client.cancelLogin()
+      expect(window.location.href).toBe(startingURL)
+      expect(flow.navigations).toHaveLength(0)
+      const beforeReplacement = parCalls(transport)
+      const cancellationCalls = transport.mock.calls.filter(
+        ([url]) => url === `${ISSUER}/auth/par/pre-navigation-cancellation`,
+      )
+      expect(cancellationCalls).toHaveLength(1)
+      expect(beforeReplacement).toHaveLength(2)
+      const cancelBody = String(cancellationCalls[0][1].body)
+      const cancelled = new URLSearchParams(cancelBody)
+      expect(cancelled.has('atol_attempt_capability')).toBe(true)
+      if (stage === 'first') {
+        expect(beforeReplacement[1][1].body).toBe(beforeReplacement[0][1].body)
+        cancelled.delete('atol_attempt_capability')
+        expect(cancelled.toString()).toBe(beforeReplacement[0][1].body)
+      } else {
+        expect(cancelBody).toBe(beforeReplacement[1][1].body)
+      }
+
+      await flow.authorization.begin(start(flow.generation, replacement))
+      const newForm = new URLSearchParams(String(parCalls(transport)[2][1].body))
+      expect(newForm.get('state')).not.toBe(cancelled.get('state'))
+      expect(newForm.has('prompt')).toBe(false)
+      expect(flow.navigations).toHaveLength(1)
+      client.destroy()
+    },
+  )
+
+  it('keeps the exact record until a browser-visible authenticated cancellation succeeds', async () => {
+    const now = 1_800_000_000_000
+    vi.spyOn(Date, 'now').mockReturnValue(now)
+    const deadline = now + 14 * 60 * 1000
+    const transport = installTransport([
+      new TypeError('lost challenge response'),
+      ordinaryAttemptChallenge(deadline),
+    ], discovery(), [new Response(null, {
+      status: 204,
+      headers: {
+        'Atol-Browser-Authorization': 'v2',
+        'Cache-Control': 'no-store',
+      },
+    })])
+    const flow = harness()
+    const client = createPublicOrdinaryClient()
+    await expect(flow.authorization.begin(start(flow.generation, { prompt: 'none' })))
+      .rejects.toBeInstanceOf(OrdinaryAuthorizationPendingError)
+    const pointer = pointerValue()
+
+    await expect(client.cancelLogin()).rejects.toBeInstanceOf(OrdinaryAuthorizationPendingError)
+    expect(pointerValue()).toEqual(pointer)
+    await expect(flow.authorization.begin(start(flow.generation)))
+      .rejects.toBeInstanceOf(OrdinaryAuthorizationIntentConflictError)
+    expect(parCalls(transport)).toHaveLength(2)
+    expect(flow.navigations).toHaveLength(0)
+
+    await client.cancelLogin()
+    expect(pointerValue).toThrow(/pointer is missing/)
+    const cancellationCalls = transport.mock.calls.filter(
+      ([url]) => url === `${ISSUER}/auth/par/pre-navigation-cancellation`,
+    )
+    expect(cancellationCalls).toHaveLength(2)
+    expect(cancellationCalls[1][1].body).toBe(cancellationCalls[0][1].body)
+    expect(parCalls(transport)).toHaveLength(2)
+    client.destroy()
+  })
+
+  it('leaves prior custody alone after the browser credential generation is signed out', async () => {
+    const transport = installTransport([new TypeError('lost response')])
+    const flow = harness()
+    await expect(flow.authorization.begin(start(flow.generation)))
+      .rejects.toBeInstanceOf(OrdinaryAuthorizationPendingError)
+    const pointer = pointerValue()
+    const requestsBeforeCancel = transport.mock.calls.length
+    rotateLogoutGeneration({ issuer: ISSUER, clientId: CLIENT_ID, redirectUri: REDIRECT_URI })
+
+    const client = createPublicOrdinaryClient()
+    await expect(client.cancelLogin()).rejects.toMatchObject({
+      code: 'credential_generation_invalidated',
+    })
+    expect(transport.mock.calls).toHaveLength(requestsBeforeCancel)
+    expect(pointerValue()).toEqual(pointer)
+    client.destroy()
   })
 
   it('rejects a malformed admitted root before creating a fresh request', async () => {

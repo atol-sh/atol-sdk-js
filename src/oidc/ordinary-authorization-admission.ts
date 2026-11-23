@@ -6,14 +6,11 @@ import {
 } from './ordinary-authorization-model'
 import {
   admittedOrdinaryAuthorizationRecord,
-  ordinaryAuthorizationAttemptChallenge,
-  ordinaryAuthorizationPARBody,
   readBoundedParResponse,
 } from './ordinary-authorization-protocol'
 import { cancelSubmittedOrdinaryAuthorization } from './ordinary-authorization-pre-navigation'
 import {
   markOrdinaryAuthorizationPARSubmitted,
-  bindOrdinaryAuthorizationAttemptCapability,
   replaceOrdinaryAuthorizationRecord,
   startOrdinaryAuthorizationCleanup,
 } from './ordinary-authorization-storage'
@@ -21,6 +18,11 @@ import {
   assertOrdinaryAuthorizationRecord,
   assertOrdinaryAuthorizationRecordState,
 } from './ordinary-authorization-validation'
+import {
+  bindOrdinaryPARChallenge,
+  postOrdinaryPAR,
+  validOrdinaryPARResponseHeaders,
+} from './ordinary-authorization-transport'
 
 export class OrdinaryAuthorizationAdmissionTerminalError extends Error {
   constructor(
@@ -36,12 +38,13 @@ export class OrdinaryAuthorizationAdmissionTerminalError extends Error {
 async function rejectUncommittedAdmission(
   submitted: OrdinaryAuthorizationRecord,
 ): Promise<OrdinaryAuthorizationRecord | null> {
+  let settled: OrdinaryAuthorizationRecord
   try {
-    await cancelSubmittedOrdinaryAuthorization(submitted)
+    settled = await cancelSubmittedOrdinaryAuthorization(submitted)
   } catch {
     return null
   }
-  return startOrdinaryAuthorizationCleanup(submitted)
+  return startOrdinaryAuthorizationCleanup(settled)
 }
 
 async function rejectOrRetainInvalidAdmission(
@@ -52,14 +55,6 @@ async function rejectOrRetainInvalidAdmission(
     throw new OrdinaryAuthorizationAdmissionTerminalError(cleaning)
   }
   throw new OrdinaryAuthorizationPendingError()
-}
-
-function validPARResponseHeaders(response: Response): boolean {
-  return (
-    response.headers.get('cache-control') === 'no-store' &&
-    response.headers.get('content-type') === 'application/json' &&
-    response.headers.get('atol-browser-authorization') === 'v2'
-  )
 }
 
 /**
@@ -96,91 +91,21 @@ export async function admitOrdinaryAuthorization(
     PAR_TIMEOUT_MS,
   )
   try {
-    let response: Response
-    let requestStartedAt = Date.now()
-    try {
-      response = await fetch(
-        submitted.pushedAuthorizationRequestEndpoint,
-        {
-          method: 'POST',
-          headers: {
-            Accept: 'application/json',
-            'Content-Type':
-              'application/x-www-form-urlencoded',
-          },
-          body: ordinaryAuthorizationPARBody(submitted),
-          cache: 'no-store',
-          credentials: 'omit',
-          redirect: 'error',
-          referrerPolicy: 'no-referrer',
-          signal: controller.signal,
-        },
-      )
-    } catch {
-      throw new OrdinaryAuthorizationPendingError()
-    }
+    const first = await postOrdinaryPAR(submitted, controller.signal)
+    let response = first.response
     if (response.status === 428) {
-      if (!validPARResponseHeaders(response)) {
-        throw new OrdinaryAuthorizationPendingError()
-      }
-      let challengeText: string
-      try {
-        challengeText = await readBoundedParResponse(
-          response,
-          controller.signal,
-        )
-      } catch {
-        throw new OrdinaryAuthorizationPendingError()
-      }
-      const challenge = ordinaryAuthorizationAttemptChallenge(
+      submitted = await bindOrdinaryPARChallenge(
         submitted,
-        challengeText,
-        requestStartedAt,
+        response,
+        first.startedAt,
+        controller.signal,
       )
-      submitted = await bindOrdinaryAuthorizationAttemptCapability(
-        submitted,
-        challenge.attemptCapability,
-        challenge.attemptExpiresAt,
-      )
-      assertOrdinaryAuthorizationRecord(
-        submitted,
-        {
-          issuer: record.issuer,
-          clientId: record.clientId,
-          redirectUri: record.redirectUri,
-          scope: record.scope,
-        },
-        record.credentialGeneration,
-        record.intent,
-      )
-      await assertOrdinaryAuthorizationRecordState(submitted)
-      requestStartedAt = Date.now()
-      try {
-        response = await fetch(
-          submitted.pushedAuthorizationRequestEndpoint,
-          {
-            method: 'POST',
-            headers: {
-              Accept: 'application/json',
-              'Content-Type':
-                'application/x-www-form-urlencoded',
-            },
-            body: ordinaryAuthorizationPARBody(submitted),
-            cache: 'no-store',
-            credentials: 'omit',
-            redirect: 'error',
-            referrerPolicy: 'no-referrer',
-            signal: controller.signal,
-          },
-        )
-      } catch {
-        throw new OrdinaryAuthorizationPendingError()
-      }
+      response = (await postOrdinaryPAR(submitted, controller.signal)).response
     }
     if (response.status !== 201) {
       throw new OrdinaryAuthorizationPendingError()
     }
-    if (!validPARResponseHeaders(response)) {
+    if (!validOrdinaryPARResponseHeaders(response)) {
       return rejectOrRetainInvalidAdmission(submitted)
     }
 

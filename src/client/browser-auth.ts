@@ -288,10 +288,10 @@ export interface AtolBrowserAuth {
    */
   getEncryptionError(): Error | undefined
   /**
-   * Cancel the response-vault interactive login owned by the current browser
-   * generation without ending an established session or navigating to the
-   * issuer. Resolves only after exact server rejection and local custody
-   * release. Unsupported auth modes and initialized/session states reject.
+   * Cancel the pending login owned by the current browser generation without
+   * ending an established session or navigating to the issuer. Resolves after
+   * local custody is released and any submitted authorization is rejected by
+   * the server. Use an uninitialized client without an established session.
    */
   cancelLogin(): Promise<void>
   /**

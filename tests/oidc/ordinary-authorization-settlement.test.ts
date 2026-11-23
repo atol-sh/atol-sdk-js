@@ -322,6 +322,7 @@ describe('ordinary authorization settlement', () => {
 
   it('fences submitted PAR custody before signed-out cleanup', async () => {
     const transport = installOrdinaryTransport([
+      ordinaryAttemptChallenge(now + 800_000),
       new TypeError('PAR response lost'),
     ])
     const flow = ordinaryHarness()
@@ -336,9 +337,9 @@ describe('ordinary authorization settlement', () => {
 
     const par = ordinaryParCalls(transport)
     const cancellation = ordinaryPreNavigationCalls(transport)
-    expect(par).toHaveLength(1)
+    expect(par).toHaveLength(2)
     expect(cancellation).toHaveLength(1)
-    expect(cancellation[0][1].body).toBe(par[0][1].body)
+    expect(cancellation[0][1].body).toBe(par[1][1].body)
     expect(cancellation[0][1]).toMatchObject({
       method: 'POST',
       credentials: 'omit',
@@ -381,7 +382,7 @@ describe('ordinary authorization settlement', () => {
     ],
   ])('retains submitted custody on pre-navigation %s', async (_name, result) => {
     const transport = installOrdinaryTransport(
-      [new TypeError('PAR response lost')],
+      [ordinaryAttemptChallenge(now + 800_000), new TypeError('PAR response lost')],
       undefined,
       [],
       [result()],
@@ -404,6 +405,7 @@ describe('ordinary authorization settlement', () => {
 
   it('uses DB-authenticated cancellation after local submitted expiry', async () => {
     const transport = installOrdinaryTransport([
+      ordinaryAttemptChallenge(now + 800_000),
       new TypeError('PAR response lost'),
     ])
     const flow = ordinaryHarness()
@@ -485,6 +487,7 @@ describe('ordinary authorization settlement', () => {
 
   it('reconciles same-application custody across redirect and scope drift', async () => {
     const transport = installOrdinaryTransport([
+      ordinaryAttemptChallenge(now + 800_000),
       new TypeError('PAR response lost'),
     ])
     const old = ordinaryHarness()

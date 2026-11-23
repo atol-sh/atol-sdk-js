@@ -312,10 +312,9 @@ export function createBrowserAuthActions(
   }
 
   async function cancelLoginOnce(): Promise<void> {
-    if (!runtime.responseVault) {
-      throw new Error('cancelLogin requires response-vault authorization')
-    }
+    const responseVault = runtime.responseVault
     const recoverableFailedInitialization =
+      responseVault !== null &&
       runtime.initPromise !== null &&
       runtime.initRejected &&
       runtime.failedInitCancellationAuthority !== null &&
@@ -337,19 +336,27 @@ export function createBrowserAuthActions(
     if (runtime.destroyed) {
       throw new Error('auth client has been destroyed')
     }
+    if (!responseVault) {
+      const generation = credentialGenerationSnapshot(
+        runtime.credentialGenerationBinding,
+      )
+      await runtime.ordinaryAuthorization!.invalidateCurrent(generation)
+      runtime.sessionOps.assertCredentialAuthority(generation)
+      return
+    }
     const markCleanupOwned = () => {
       runtime.destroyAuthorizationCleanupStarted = true
     }
     if (recoverableFailedInitialization) {
       await cancelResponseVaultFailedInitialization(
-        runtime.responseVault,
+        responseVault,
         runtime.failedInitCancellationAuthority as NonNullable<
           typeof runtime.failedInitCancellationAuthority
         >,
         markCleanupOwned,
       )
     } else {
-      await runtime.responseVault.cancelLogin(markCleanupOwned)
+      await responseVault.cancelLogin(markCleanupOwned)
     }
     if (recoverableFailedInitialization) {
       runtime.initPromise = null

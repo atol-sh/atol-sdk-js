@@ -21,6 +21,10 @@ export {
   createAtolBrowserAuth,
 } from './client/browser-auth'
 export { RESPONSE_VAULT_PROTOCOL_VERSION } from './oidc/response-vault'
+export {
+  OrdinaryAuthorizationIntentConflictError,
+  OrdinaryAuthorizationPendingError,
+} from './oidc/ordinary-authorization-model'
 export type {
   AtolBrowserAuth,
   AtolBrowserAuthConfig,

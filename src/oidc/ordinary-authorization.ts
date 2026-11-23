@@ -18,12 +18,14 @@ import { OrdinaryAuthorizationCallbackController } from './ordinary-authorizatio
 import {
   ORDINARY_AUTHORIZATION_POINTER_VERSION,
   ORDINARY_AUTHORIZATION_RECORD_VERSION,
+  OrdinaryAuthorizationIntentConflictError,
   OrdinaryAuthorizationPendingError,
   canonicalOrdinaryAuthorizationBinding,
   newOrdinaryAuthorizationCancellationSecret,
   ordinaryAuthorizationPointerKey,
   ordinaryAuthorizationRecordExpired,
   ordinaryAuthorizationSlotKey,
+  parseOrdinaryAuthorizationIntent,
   serializedOrdinaryAuthorizationIntent,
   validCanonicalSHA256,
   type OrdinaryAuthorizationBinding,
@@ -366,9 +368,15 @@ export class OrdinaryBrowserAuthorization {
       record,
       this.binding,
       generation,
-      intent,
+      record.intent,
     )
     await assertOrdinaryAuthorizationRecordState(record)
+    if (record.intent !== intent) {
+      const pending = parseOrdinaryAuthorizationIntent(record.intent)
+      throw new OrdinaryAuthorizationIntentConflictError(
+        pending.prompt === 'none' ? 'silent' : 'interactive',
+      )
+    }
     if (record.cleanupStarted) {
       await this.callbacks.finishCleanup(record)
       return null
