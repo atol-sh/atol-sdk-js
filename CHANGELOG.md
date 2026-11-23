@@ -23,7 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   SDK sends cancellation. Changing sign-in options never cancels implicitly.
 - Response-vault login and renewal can release expired interactive sign-in
   custody left by another tab of the same active browser session. Recovery
-  uses authenticated terminal proof for the exact bootstrap or transaction.
+  uses authenticated terminal proof for the exact bootstrap, a possibly
+  committed PAR, or the bound transaction.
 
 ## [0.4.1] - 2026-11-22
 

@@ -27,7 +27,7 @@ import {
 import { randomOpaque, slotKey, validSlotRecord } from './response-vault-storage-validation'
 
 export type ResponseVaultPeerTerminalAuthority =
-  | { kind: 'bootstrap'; authority: ResponseVaultBootstrapAuthority }
+  | { kind: 'bootstrap' | 'par'; authority: ResponseVaultBootstrapAuthority }
   | { kind: 'transaction'; authority: ResponseVaultCancellation }
 
 function isRejectionCustody(status: ResponseVaultCustody['status']): boolean {
@@ -89,7 +89,7 @@ async function checkExpiredPeerCustody(
     validatePeer(record)
     if (record.mode !== 'interactive') throw new ResponseVaultExecutionBusyError()
     return {
-      kind: 'bootstrap',
+      kind: record.status === 'par_pending' ? 'par' : 'bootstrap',
       authority: {
         tabSecret: record.tabSecret,
         cancellationSecret: record.cancellationSecret,

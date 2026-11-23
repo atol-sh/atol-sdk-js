@@ -158,11 +158,13 @@ describe('response-vault expired peer recovery', () => {
   })
 
   it.each(['before challenge', 'after challenge', 'PAR response'] as const)(
-    'requires exact bootstrap terminal status for a tab closed after %s', async (stage) => {
+    'requires phase-specific terminal status for a tab closed at %s', async (stage) => {
       const stored = await strandBeforePAR(stage)
       const terminal = vi.fn(() => jsonResponse({ error: 'authorization_terminal' }, 410))
       const requests = installFetchRouter((request) => {
-        if (request.url === bootstrapURL && request.body.mode === 'terminal_only') return terminal()
+        if (request.url === bootstrapURL && (request.body.mode === 'terminal_only' || request.body.mode === 'par_terminal_only')) {
+          return terminal()
+        }
         if (request.url === rejectURL) return noContent()
         const protocol = protocolStartResponse(request)
         if (protocol) return protocol
@@ -172,11 +174,12 @@ describe('response-vault expired peer recovery', () => {
       const replacement = await start(newVault())
 
       expect(terminal).toHaveBeenCalledOnce()
-      const probeIndex = requests.findIndex(({ body }) => body.mode === 'terminal_only')
+      const mode = stage === 'PAR response' ? 'par_terminal_only' : 'terminal_only'
+      const probeIndex = requests.findIndex(({ body }) => body.mode === mode)
       expect(probeIndex).toBe(stage === 'before challenge' ? 1 : 0)
       const probe = requests[probeIndex]
       expect(probe).toMatchObject({ url: bootstrapURL, body: {
-        mode: 'terminal_only',
+        mode,
         tab_secret: stored.tabSecret,
         cancellation_secret: stored.cancellationSecret,
         par_idempotency_key: stored.parIdempotencyKey,
@@ -194,14 +197,27 @@ describe('response-vault expired peer recovery', () => {
     },
   )
 
-  it('does not clear a lost PAR response on a nonterminal bootstrap probe', async () => {
+  it('retains custody when a potentially committed PAR is nonterminal', async () => {
     const stored = await strandBeforePAR('PAR response')
     const requests = installFetchRouter(() => jsonResponse({ error: 'authorization_nonterminal' }, 409))
 
     await expect(start(newVault())).rejects.toThrow()
 
     expect(requests).toHaveLength(1)
-    expect(requests[0]).toMatchObject({ url: bootstrapURL, body: { mode: 'terminal_only' } })
+    expect(requests[0]).toMatchObject({ url: bootstrapURL, body: { mode: 'par_terminal_only' } })
+    await expect(readAuthorizationRecord(String(stored.id))).resolves.toEqual(stored)
+  })
+
+  it('never falls back to bootstrap-only terminal proof for an uncertain PAR', async () => {
+    const stored = await strandBeforePAR('PAR response')
+    const requests = installFetchRouter(({ body }) => body.mode === 'terminal_only'
+      ? jsonResponse({ error: 'authorization_terminal' }, 410)
+      : jsonResponse({ error: 'invalid_request' }, 400))
+
+    await expect(start(newVault())).rejects.toThrow()
+
+    expect(requests).toHaveLength(1)
+    expect(requests[0]).toMatchObject({ url: bootstrapURL, body: { mode: 'par_terminal_only' } })
     await expect(readAuthorizationRecord(String(stored.id))).resolves.toEqual(stored)
   })
 

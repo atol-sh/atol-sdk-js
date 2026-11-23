@@ -446,9 +446,9 @@ export abstract class ResponseVaultCustodyLayer extends ResponseVaultRejection {
           this.config,
           authorization,
           currentGeneration,
-          (candidate) => candidate.kind === 'bootstrap'
-            ? this.probeBootstrapTerminalStatus(candidate.authority)
-            : this.probeTerminalStatus(candidate.authority),
+          (candidate) => candidate.kind === 'transaction'
+            ? this.probeTerminalStatus(candidate.authority)
+            : this.probeBootstrapTerminalStatus(candidate.authority, candidate.kind === 'par'),
         )
         if (recovered) {
           this.clearActive(authorization.reference)
@@ -560,7 +560,10 @@ export abstract class ResponseVaultCustodyLayer extends ResponseVaultRejection {
     )
     onExecutionClaimed?.()
     try {
-      await this.bootstrapClient(claimed, 'terminal_only')
+      await this.bootstrapClient(
+        claimed,
+        claimed.status === 'par_pending' ? 'par_terminal_only' : 'terminal_only',
+      )
       throw new Error(
         'response vault: terminal bootstrap classification returned',
       )

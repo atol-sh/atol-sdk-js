@@ -211,9 +211,9 @@ client-origin endpoint accepts:
 }
 ```
 
-`mode` is exactly `create` or `terminal_only`. Both modes reuse the same
-persisted capabilities. They send no CSRF header and may carry the HttpOnly
-cookie from an earlier exact attempt.
+`mode` is `create`, `terminal_only`, or `par_terminal_only`. Each reuses the
+same persisted capabilities and sends no CSRF header. `create` and
+`terminal_only` may carry the HttpOnly cookie from an earlier exact attempt.
 
 `create` success is `201`:
 
@@ -242,6 +242,14 @@ capability-bound terminal fence before returning 410. A delayed create cannot
 resurrect that attempt. Only an authenticated exact 410 permits local
 deletion. An exact 409, a generic error, a malformed response, or an
 unauthenticated 410 preserves prepared custody.
+
+`par_terminal_only` also proves the status of a possibly committed PAR after
+its response was lost. It authenticates the signed attempt capability and
+exact bootstrap binding without needing the expired browser cookie. It
+returns 409 while a linked transaction remains live and 410 only after the
+bootstrap and any linked transaction are terminal. An old server can reject
+this mode without releasing custody. The SDK does not fall back to the
+bootstrap-only proof for `par_pending`.
 
 The issuer bootstrap endpoint remains separate and accepts only:
 
@@ -627,12 +635,13 @@ rejecting peer authority.
 An expired interactive authorization can be recovered by a different tab
 under the same exact binding and live logout generation. The SDK holds the
 authorization Web Lock and validates the active slot and durable revision
-before the terminal probe and again before deletion. `prepared` and
-`par_pending` use the exact bootstrap's `terminal_only` probe. Without a
-persisted attempt capability, `prepared` can only have sent the capability-free
-bootstrap challenge. Recovery first obtains that challenge, then uses its
-signed capability for `terminal_only`. An issuer transaction is probed with
-its own signed terminal authority once PAR is durably bound. The SDK clears
+before the terminal probe and again before deletion. `prepared` uses the
+exact bootstrap's `terminal_only` probe. Without a persisted attempt
+capability, `prepared` can only have sent the capability-free bootstrap
+challenge. Recovery first obtains that challenge, then uses its signed
+capability for `terminal_only`. `par_pending` uses `par_terminal_only` to
+check for a linked transaction. Once PAR is durably bound, the issuer
+transaction is probed with its own signed terminal authority. The SDK clears
 neither live nor uncertain state and never acquires a peer grant.
 
 Two independent, random 32-byte generations fence asynchronous work:

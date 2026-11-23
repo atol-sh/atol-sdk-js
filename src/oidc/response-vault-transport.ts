@@ -27,8 +27,11 @@ import { NetworkError, OAuthProtocolError } from './token-recovery'
 export abstract class ResponseVaultTransport extends ResponseVaultContext {
   protected async bootstrapClient(
     authorization: ResponseVaultBootstrapAuthority,
-    mode: 'create' | 'terminal_only' = 'create',
+    mode: 'create' | 'terminal_only' | 'par_terminal_only' = 'create',
   ): Promise<BootstrapResponse | BootstrapAttemptChallenge> {
+    if (mode === 'par_terminal_only' && !authorization.bootstrapAttemptCapability) {
+      throw new NetworkError('response vault: PAR recovery attempt capability is unavailable')
+    }
     const endpoints = await this.endpointRegistry()
     const requestStartedAt = Date.now()
     const response = await this.postJSON(
@@ -64,7 +67,7 @@ export abstract class ResponseVaultTransport extends ResponseVaultContext {
       throw new ResponseVaultAuthenticatedTerminalError()
     }
     if (
-      mode === 'terminal_only' &&
+      mode !== 'create' &&
       isAuthenticatedNonterminalResponse(response, envelope)
     ) {
       throw new ResponseVaultAuthorizationBusyError()
@@ -95,8 +98,9 @@ export abstract class ResponseVaultTransport extends ResponseVaultContext {
 
   protected async probeBootstrapTerminalStatus(
     authority: ResponseVaultBootstrapAuthority,
+    possibleCommittedPAR: boolean,
   ): Promise<'terminal' | 'nonterminal'> {
-    if (!authority.bootstrapAttemptCapability) {
+    if (!possibleCommittedPAR && !authority.bootstrapAttemptCapability) {
       // An attempt capability is durable before it can be sent on create.
       // With none, only the capability-free challenge could have been sent.
       const challenge = await this.bootstrapClient(authority)
@@ -106,7 +110,7 @@ export abstract class ResponseVaultTransport extends ResponseVaultContext {
       authority = { ...authority, bootstrapAttemptCapability: challenge.attemptCapability }
     }
     try {
-      await this.bootstrapClient(authority, 'terminal_only')
+      await this.bootstrapClient(authority, possibleCommittedPAR ? 'par_terminal_only' : 'terminal_only')
     } catch (error) {
       if (error instanceof ResponseVaultAuthenticatedTerminalError) return 'terminal'
       if (error instanceof ResponseVaultAuthorizationBusyError) return 'nonterminal'

@@ -318,7 +318,8 @@ This is a security library first. Key properties:
   renewal can release an expired interactive sign-in from another tab within
   the same client binding and active logout generation. The SDK holds the
   authorization Web Lock and releases the exact local slot only after the
-  issuer authenticates terminal state for its bootstrap or transaction. Live
+  issuer authenticates terminal state for its bootstrap or transaction. Lost
+  PAR responses require the server to check for the linked transaction. Live
   or uncertain results keep the pending authorization in custody.
 
 Found a vulnerability? See [SECURITY.md](./SECURITY.md) for how to report
