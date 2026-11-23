@@ -21,9 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `cancelLogin()` can abandon an ordinary sign-in after exact authenticated
   settlement. A lost initial PAR challenge is recovered and bound before the
   SDK sends cancellation. Changing sign-in options never cancels implicitly.
-- Response-vault login and renewal can release an expired interactive
-  navigation left by another tab of the same active browser session. The SDK
-  waits for authenticated terminal proof from the issuer.
+- Response-vault login and renewal can release expired interactive sign-in
+  custody left by another tab of the same active browser session. Recovery
+  uses authenticated terminal proof for the exact bootstrap or transaction.
 
 ## [0.4.1] - 2026-11-22
 

@@ -1,4 +1,5 @@
 import { ResponseVaultContext } from './response-vault-context'
+import type { ResponseVaultBootstrapAuthority } from './response-vault-model'
 import {
   RESPONSE_VAULT_PROTOCOL_VERSION,
   ResponseVaultAuthenticatedTerminalError,
@@ -25,7 +26,7 @@ import { NetworkError, OAuthProtocolError } from './token-recovery'
 
 export abstract class ResponseVaultTransport extends ResponseVaultContext {
   protected async bootstrapClient(
-    authorization: ResponseVaultAuthorization,
+    authorization: ResponseVaultBootstrapAuthority,
     mode: 'create' | 'terminal_only' = 'create',
   ): Promise<BootstrapResponse | BootstrapAttemptChallenge> {
     const endpoints = await this.endpointRegistry()
@@ -90,6 +91,28 @@ export abstract class ResponseVaultTransport extends ResponseVaultContext {
       )
     }
     throw protocolError(response.status, envelope, 'client bootstrap')
+  }
+
+  protected async probeBootstrapTerminalStatus(
+    authority: ResponseVaultBootstrapAuthority,
+  ): Promise<'terminal' | 'nonterminal'> {
+    if (!authority.bootstrapAttemptCapability) {
+      // An attempt capability is durable before it can be sent on create.
+      // With none, only the capability-free challenge could have been sent.
+      const challenge = await this.bootstrapClient(authority)
+      if (!('attemptCapability' in challenge)) {
+        throw new NetworkError('response vault: expected a bootstrap attempt challenge')
+      }
+      authority = { ...authority, bootstrapAttemptCapability: challenge.attemptCapability }
+    }
+    try {
+      await this.bootstrapClient(authority, 'terminal_only')
+    } catch (error) {
+      if (error instanceof ResponseVaultAuthenticatedTerminalError) return 'terminal'
+      if (error instanceof ResponseVaultAuthorizationBusyError) return 'nonterminal'
+      throw error
+    }
+    throw new NetworkError('response vault: bootstrap terminal status is unavailable')
   }
 
   protected async pushAuthorization(

@@ -18,7 +18,7 @@ import {
 } from './response-vault-contract'
 import { closedCustodyError } from './response-vault-custody-errors'
 import { ResponseVaultRejection } from './response-vault-rejection'
-import { recoverExpiredPeerNavigation } from './response-vault-storage-peer-navigation'
+import { isExpiredPeerRecoveryCandidate, recoverExpiredPeerAuthorization } from './response-vault-storage-peer-recovery'
 import {
   bindResponseVaultFailedInitialization,
   bindResponseVaultFailedInitializationAuthority,
@@ -436,20 +436,19 @@ export abstract class ResponseVaultCustodyLayer extends ResponseVaultRejection {
       !bindingMatches ||
       authorization.credentialGeneration.tabOwner !== currentGeneration.tabOwner
     ) {
-      const mode = 'dpopKey' in authorization ? authorization.mode : authorization.sourceMode
       if (
         bindingMatches &&
-        mode === 'interactive' &&
-        authorization.status === 'navigating' &&
-        authorization.expiresAt <= Date.now() &&
+        isExpiredPeerRecoveryCandidate(authorization) &&
         authorization.credentialGeneration.logout === currentGeneration.logout &&
         abandonedCleanupError === undefined
       ) {
-        const recovered = await recoverExpiredPeerNavigation(
+        const recovered = await recoverExpiredPeerAuthorization(
           this.config,
           authorization,
           currentGeneration,
-          (candidate) => this.probeTerminalStatus(candidate),
+          (candidate) => candidate.kind === 'bootstrap'
+            ? this.probeBootstrapTerminalStatus(candidate.authority)
+            : this.probeTerminalStatus(candidate.authority),
         )
         if (recovered) {
           this.clearActive(authorization.reference)

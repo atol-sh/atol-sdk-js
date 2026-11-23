@@ -315,11 +315,11 @@ This is a security library first. Key properties:
   callback, logout, successful initialization, and destroyed states return
   `false` and are never promoted into restart authority.
 - **Expired verification left by another tab.** Response-vault login and
-  renewal can release an expired interactive navigation from another tab
-  within the same client binding and active logout generation. The SDK holds
-  the transaction Web Lock and releases the exact local slot only after the
-  issuer authenticates terminal state. Live or uncertain results keep the
-  pending authorization in custody.
+  renewal can release an expired interactive sign-in from another tab within
+  the same client binding and active logout generation. The SDK holds the
+  authorization Web Lock and releases the exact local slot only after the
+  issuer authenticates terminal state for its bootstrap or transaction. Live
+  or uncertain results keep the pending authorization in custody.
 
 Found a vulnerability? See [SECURITY.md](./SECURITY.md) for how to report
 it privately.

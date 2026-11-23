@@ -624,6 +624,17 @@ Long-running external login or MFA therefore does not depend on renewing a
 short execution lease, and another live SDK instance reports busy rather than
 rejecting peer authority.
 
+An expired interactive authorization can be recovered by a different tab
+under the same exact binding and live logout generation. The SDK holds the
+authorization Web Lock and validates the active slot and durable revision
+before the terminal probe and again before deletion. `prepared` and
+`par_pending` use the exact bootstrap's `terminal_only` probe. Without a
+persisted attempt capability, `prepared` can only have sent the capability-free
+bootstrap challenge. Recovery first obtains that challenge, then uses its
+signed capability for `terminal_only`. An issuer transaction is probed with
+its own signed terminal authority once PAR is durably bound. The SDK clears
+neither live nor uncertain state and never acquires a peer grant.
+
 Two independent, random 32-byte generations fence asynchronous work:
 
 - the credential-authority generation is origin-wide for an exact issuer,

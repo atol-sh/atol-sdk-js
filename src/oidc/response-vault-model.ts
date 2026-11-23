@@ -312,6 +312,11 @@ export interface ResponseVaultAuthorization {
   dpopKey: DPoPKeyManager
 }
 
+export type ResponseVaultBootstrapAuthority = Pick<
+  ResponseVaultAuthorization,
+  'tabSecret' | 'cancellationSecret' | 'parIdempotencyKey' | 'bootstrapAttemptCapability'
+>
+
 /**
  * Minimal monotonic server-cancellation authority.
  *
