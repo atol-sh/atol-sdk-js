@@ -139,9 +139,12 @@ export function createBrowserAuthActions(
   }
 
   async function selectOrganization(
-    organizationId: string,
+    organizationId: string | null,
   ): Promise<AtolSession> {
-    if (!CANONICAL_ULID.test(organizationId)) {
+    if (
+      organizationId !== null &&
+      (typeof organizationId !== 'string' || !CANONICAL_ULID.test(organizationId))
+    ) {
       throw new Error(
         'organizationId must be a canonical ULID',
       )
@@ -162,16 +165,17 @@ export function createBrowserAuthActions(
     }
 
     const selectionEpoch = ++runtime.credentialEpoch
+    const expectedOrganizationId = organizationId ?? undefined
     runtime.sessionOps.clearRenewTimer()
     try {
       const grant = await runtime.renewalOps.renewViaIframe(
-        organizationId,
+        expectedOrganizationId,
         selectionGeneration,
         true,
       )
       await runtime.credentialOps.applyAuthorizationGrant(grant, {
         epoch: selectionEpoch,
-        expectedOrganizationId: organizationId,
+        expectedOrganizationId,
         enforceExpectedOrganization: true,
         preserveExistingTokens: false,
         expectedNonce: grant.nonce,

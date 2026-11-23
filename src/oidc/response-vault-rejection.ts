@@ -89,6 +89,29 @@ export abstract class ResponseVaultRejection extends ResponseVaultTransport {
     }
   }
 
+  protected async probeTerminalStatus(
+    cancellation: ResponseVaultCancellation,
+  ): Promise<'terminal' | 'nonterminal'> {
+    const response = await this.postJSON(
+      `${this.clientOrigin}${REJECT_PATH}`,
+      {
+        version: RESPONSE_VAULT_PROTOCOL_VERSION,
+        mode: 'terminal_only',
+        transaction_id: cancellation.transactionId,
+        client_id: cancellation.binding.clientId,
+        tab_secret: cancellation.tabSecret,
+        cancellation_secret: cancellation.cancellationSecret,
+        terminal_proof: cancellation.terminalProof,
+      },
+      'authorization terminal probe',
+      'same-origin',
+    )
+    const envelope = await responseEnvelope(response)
+    if (isAuthenticatedTerminalResponse(response, envelope)) return 'terminal'
+    if (isAuthenticatedNonterminalResponse(response, envelope)) return 'nonterminal'
+    throw protocolError(response.status, envelope, 'authorization terminal probe')
+  }
+
   private async probeTerminal(
     initial: ResponseVaultCancellation,
     claim: (owner: string) => Promise<ResponseVaultCancellation>,
@@ -105,39 +128,9 @@ export abstract class ResponseVaultRejection extends ResponseVaultTransport {
       onExecutionClaimed?.()
       let lastError: unknown
       for (let attempt = 0; attempt < 3; attempt++) {
-        let authenticatedTerminal = false
-        let authenticatedNonterminal = false
+        let outcome: 'terminal' | 'nonterminal'
         try {
-          const response = await this.postJSON(
-            `${this.clientOrigin}${REJECT_PATH}`,
-            {
-              version: RESPONSE_VAULT_PROTOCOL_VERSION,
-              mode: 'terminal_only',
-              transaction_id: cancellation.transactionId,
-              client_id: cancellation.binding.clientId,
-              tab_secret: cancellation.tabSecret,
-              cancellation_secret: cancellation.cancellationSecret,
-              terminal_proof: cancellation.terminalProof,
-            },
-            'authorization terminal probe',
-            'same-origin',
-          )
-          const envelope = await responseEnvelope(response)
-          authenticatedTerminal = isAuthenticatedTerminalResponse(
-            response,
-            envelope,
-          )
-          authenticatedNonterminal = isAuthenticatedNonterminalResponse(
-            response,
-            envelope,
-          )
-          if (!authenticatedTerminal && !authenticatedNonterminal) {
-            throw protocolError(
-              response.status,
-              envelope,
-              'authorization terminal probe',
-            )
-          }
+          outcome = await this.probeTerminalStatus(cancellation)
         } catch (error) {
           lastError = error
           if (attempt < 2) {
@@ -145,7 +138,7 @@ export abstract class ResponseVaultRejection extends ResponseVaultTransport {
           }
           continue
         }
-        if (authenticatedTerminal) {
+        if (outcome === 'terminal') {
           try {
             await discardResponseVaultCancellation(cancellation)
           } catch (error) {

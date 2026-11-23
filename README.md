@@ -124,7 +124,10 @@ freshness check and renews immediately; `stepUp()` forces re-authentication
 (`prompt=login`, `max_age=0`, `acr_values=mfa` by default) for a sensitive
 operation that requires a fresh auth; `selectOrganization(id)` starts a
 distinct silent organization grant and exposes the selected ID on
-`AtolSession.organizationId`; `restartLogin()` explicitly settles the exact
+`AtolSession.organizationId`. Pass `null` to request an unscoped grant for
+the same authenticated subject on the existing client. Both tokens must
+verify with the requested scope before the SDK replaces the previous pair.
+`restartLogin()` explicitly settles the exact
 response-vault authorization that made signed-out initialization fail, then
 starts one fresh login; `canRestartLogin()` reports whether this runtime holds
 the hidden exact authority required for that operation;
@@ -311,6 +314,12 @@ This is a security library first. Key properties:
   `canRestartLogin()` is the read-only UI capability check; generic startup,
   callback, logout, successful initialization, and destroyed states return
   `false` and are never promoted into restart authority.
+- **Expired verification left by another tab.** Response-vault login and
+  renewal can release an expired interactive navigation from another tab
+  within the same client binding and active logout generation. The SDK holds
+  the transaction Web Lock and releases the exact local slot only after the
+  issuer authenticates terminal state. Live or uncertain results keep the
+  pending authorization in custody.
 
 Found a vulnerability? See [SECURITY.md](./SECURITY.md) for how to report
 it privately.

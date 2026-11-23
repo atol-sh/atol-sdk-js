@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.4.2] - 2026-11-23
 
+### Added
+
+- `selectOrganization(null)` requests and verifies an unscoped credential
+  pair for the current subject on the existing browser auth client.
+
 ### Fixed
 
 - Ordinary browser authorization reports a typed intent conflict when a
@@ -16,6 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `cancelLogin()` can abandon an ordinary sign-in after exact authenticated
   settlement. A lost initial PAR challenge is recovered and bound before the
   SDK sends cancellation. Changing sign-in options never cancels implicitly.
+- Response-vault login and renewal can release an expired interactive
+  navigation left by another tab of the same active browser session. The SDK
+  waits for authenticated terminal proof from the issuer.
 
 ## [0.4.1] - 2026-11-22
 

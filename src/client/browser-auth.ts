@@ -248,12 +248,13 @@ export interface AtolBrowserAuth {
    */
   completeLogin(): Promise<AtolSession>
   /**
-   * Mint a new credential pair scoped to `organizationId`. This is a
+   * Mint a new credential pair scoped to `organizationId`. Pass `null` to
+   * require an unscoped credential pair for the same authenticated user. This is a
    * distinct prompt=none authorization transaction, never an alias for a
    * generic renewal. The previous credential pair remains active if the
    * selection fails.
    */
-  selectOrganization(organizationId: string): Promise<AtolSession>
+  selectOrganization(organizationId: string | null): Promise<AtolSession>
   /**
    * Return the current access token, renewing it when it is inside the 60s
    * expiry window. With `opts.dpop` and DPoP active, also returns a bound

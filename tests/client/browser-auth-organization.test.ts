@@ -12,6 +12,7 @@ import {
   makeAccessToken,
   makeClient,
   makeIDToken,
+  makeJWT,
   makeOrgAccessToken,
   manager,
   mockAuthorize,
@@ -255,6 +256,48 @@ describe('createAtolBrowserAuth -- organization credential context', () => {
     expect(user.orgId).toBeUndefined()
     expect(user.roles).toBeUndefined()
     expect(user.plan).toBeUndefined()
+  })
+
+  it('requires an unscoped grant for the same user when clearing organization selection', async () => {
+    const client = await loggedInForOrganization(ORG_A)
+    mockAuthorize.mockResolvedValue({ code: 'platform', state: 's', codeVerifier: 'v', nonce: 'nonce-v' })
+    mockExchange.mockResolvedValueOnce(tokenResponse({
+      access_token: makeAccessToken(),
+      id_token: makeIDToken(),
+    }))
+
+    const selection = await client.selectOrganization(null)
+    const authorizeStart = ordinaryBeginSpy().mock.calls.at(-1)?.[0] as
+      | { intent: { extraQueryParams?: Record<string, string> } }
+      | undefined
+
+    expect(authorizeStart?.intent.extraQueryParams).not.toHaveProperty('atol_org_id')
+    expect(selection.user?.id).toBe('user-1')
+    expect(selection.organizationId).toBeUndefined()
+    const credential = await client.getAccessToken()
+    expect(credential).toBeDefined()
+    expect(organizationClaim(credential?.token)).toBeUndefined()
+    expect(organizationClaim(client.getIdToken())).toBeUndefined()
+    client.destroy()
+  })
+
+  it.each(['scoped', 'other subject'] as const)('keeps scoped credentials when a platform grant is %s', async (failure) => {
+    const client = await loggedInForOrganization(ORG_A)
+    mockAuthorize.mockResolvedValue({ code: 'platform', state: 's', codeVerifier: 'v', nonce: 'nonce-v' })
+    mockExchange.mockResolvedValueOnce(tokenResponse(failure === 'scoped' ? {
+      access_token: makeOrgAccessToken(ORG_B),
+      id_token: makeIDToken({ 'atol:org_id': ORG_B }),
+    } : {
+      access_token: makeJWT({ sub: 'user-2', exp: Math.floor(Date.now() / 1000) + 3600 }),
+      id_token: makeIDToken({ sub: 'user-2' }),
+    })).mockRejectedValueOnce(new OAuthProtocolError('invalid_grant'))
+
+    await expect(client.selectOrganization(null)).rejects.toThrow(
+      failure === 'scoped' ? /requested organization/ : /subject/i,
+    )
+    expect(organizationClaim((await client.getAccessToken())?.token)).toBe(ORG_A)
+    expect(organizationClaim(client.getIdToken())).toBe(ORG_A)
+    client.destroy()
   })
 
   it('[R31] rejects an organization grant that changes the authenticated subject', async () => {
