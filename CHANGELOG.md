@@ -6,6 +6,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-11-24
+
+### Fixed
+
+- Console reloads defer background settlement checks for completed sign-ins
+  until their retained deadline. This avoids repeated HTTP 409 responses.
+  Explicit sign-out and active sign-in recovery keep their existing behavior.
+
 ## [0.4.2] - 2026-11-23
 
 ### Added
