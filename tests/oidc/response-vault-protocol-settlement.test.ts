@@ -410,7 +410,6 @@ describe('public response-vault protocol', () => {
       noContent(),
       relaySuccess(),
       noContent(),
-      jsonResponse({ error: 'authorization_terminal' }, 410),
       bootstrap(OPAQUE_A),
       pushed(),
       issuerBootstrap(OPAQUE_C),

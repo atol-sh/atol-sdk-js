@@ -754,8 +754,11 @@ A relayed success is not immediately live:
 
 A fresh SDK instance for the same binding and tab owner treats retained
 `adopted` custody as abandoned and rejects it before recovery. Ordinary crash
-compensation excludes `published`. Explicit lifecycle invalidation and logout
-include it. Cleanup inventory uses a durable primary-key continuation and
+compensation excludes `published`. Background cleanup probes published records
+at or after their retained deadline. The deadline schedules the probe, and
+only an authenticated terminal response allows removal. Explicit lifecycle
+invalidation and logout include published records regardless of the deadline.
+Cleanup inventory uses a durable primary-key continuation and
 visits at most 64 records per invocation. Repeated invocations advance through
 unrelated and owned custody without materializing the database, and wrap after
 reaching the end. The loader returns a two-phase continuation: the caller

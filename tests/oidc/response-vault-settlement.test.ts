@@ -45,6 +45,14 @@ const BINDING = {
   scope: 'openid profile email',
 }
 
+function reachPublishedDeadline(record: Record<string, unknown>): void {
+  const { expiresAt } = record
+  if (typeof expiresAt !== 'number' || expiresAt <= Date.now()) {
+    throw new Error('test published deadline is unavailable')
+  }
+  vi.spyOn(Date, 'now').mockReturnValue(expiresAt)
+}
+
 describe('response-vault publication and cancellation settlement', () => {
   it('carries exact PAR authority through publishing, finalization, and publication', async () => {
     const captured = installFetchRouter((request) => {
@@ -148,7 +156,10 @@ describe('response-vault publication and cancellation settlement', () => {
     await expect(readAuthorizationRecord(reference)).resolves.toBeUndefined()
   })
 
-  it('probes but does not cancel a clean published family from another live SDK instance', async () => {
+  it.each([
+    ['terminal', 410, 'authorization_terminal'],
+    ['nonterminal', 409, 'authorization_nonterminal'],
+  ] as const)('defers a published probe until its deadline and handles %s', async (outcome, status, errorCode) => {
     const captured = installFetchRouter((request) => {
       const protocol = protocolStartResponse(request)
       if (protocol) return protocol
@@ -158,7 +169,7 @@ describe('response-vault publication and cancellation settlement', () => {
         request.url.endsWith('/reject') &&
         request.body.mode === 'terminal_only'
       ) {
-        return jsonResponse({ error: 'authorization_nonterminal' }, 409)
+        return jsonResponse({ error: errorCode }, status)
       }
       if (request.url.endsWith('/reject')) return noContent()
       throw new Error(`unexpected request: ${request.url}`)
@@ -197,13 +208,22 @@ describe('response-vault publication and cancellation settlement', () => {
       'version',
     ])
 
+    const rejectionRequests = () => captured.filter((request) =>
+      request.url.endsWith('/reject'),
+    )
+    for (let reload = 0; reload < 3; reload++) {
+      await expect(newVault().completeInteractive()).rejects.toThrow(
+        /no same-tab authorization is pending/,
+      )
+    }
+    expect(rejectionRequests()).toHaveLength(0)
+    await expect(readAuthorizationRecord(reference)).resolves.toEqual(published)
+
+    reachPublishedDeadline(published)
     await expect(newVault().completeInteractive()).rejects.toThrow(
       /no same-tab authorization is pending/,
     )
-
-    const probes = captured.filter((request) =>
-      request.url.endsWith('/reject'),
-    )
+    const probes = rejectionRequests()
     expect(probes).toHaveLength(1)
     expect(probes[0].body).toEqual({
       version: 1,
@@ -215,9 +235,13 @@ describe('response-vault publication and cancellation settlement', () => {
       terminal_proof: TERMINAL_PROOF,
     })
     expectNoActiveReference()
-    await expect(readAuthorizationRecord(reference)).resolves.toMatchObject({
-      status: 'published',
-    })
+    if (outcome === 'terminal') {
+      await expect(readAuthorizationRecord(reference)).resolves.toBeUndefined()
+    } else {
+      await expect(readAuthorizationRecord(reference)).resolves.toMatchObject({
+        status: 'published',
+      })
+    }
   })
 
   it.each([
@@ -257,6 +281,7 @@ describe('response-vault publication and cancellation settlement', () => {
       }
       const grant = await first.completeInteractive()
       await completeGrantPublication(grant)
+      reachPublishedDeadline(await readAuthorizationRecord(reference))
 
       await expect(newVault().completeInteractive()).rejects.toBeInstanceOf(
         ResponseVaultCleanupPendingError,

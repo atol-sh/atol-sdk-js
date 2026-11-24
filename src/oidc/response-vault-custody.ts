@@ -318,6 +318,9 @@ export abstract class ResponseVaultCustodyLayer extends ResponseVaultRejection {
         cancellation.credentialGeneration.tabOwner ===
           currentGeneration.tabOwner
       if (!owned) continue
+      // The retained deadline schedules cleanup. Only authenticated server
+      // terminality authorizes discarding published cancellation custody.
+      if (cancellation.expiresAt > Date.now()) continue
       try {
         await this.probePublishedTerminal(cancellation)
       } catch (error) {
